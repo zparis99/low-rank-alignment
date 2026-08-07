@@ -20,6 +20,7 @@ RRR_CONFIG      ?= configs/rrr/rrr_default.yml
 LANGUAGE_DECODING_CONFIG ?= configs/rrr/language_decoding.yml
 LANGUAGE_RECONSTRUCTION_CONFIG ?= configs/rrr/language_reconstruction.yml
 LANGUAGE_AXIS_ENCODING_CONFIG ?= configs/rrr/language_axis_encoding.yml
+SUBSPACE_COMPARISON_CONFIG ?= configs/rrr/compare_subspaces.yml
 LANGUAGE_FEATURE_CONFIG ?= configs/language_features/podcast.yml
 GCCA_CONFIG     ?= configs/gcca/maxvar_gcca.yml
 GCCA_ENCODING_CONFIG ?= configs/gcca/encoding.yml
@@ -203,6 +204,12 @@ plots:
 rrr:
 	mkdir -p logs
 	$(CMD) scripts/rrr/run_rrr.py --config $(RRR_CONFIG) $(OVERRIDES)
+
+## Compare configured saved RRR/PCA spaces over a shared evaluation stimulus.
+## Use CMD="uv run python" for a local run.
+compare-subspaces:
+	mkdir -p logs
+	$(CMD) scripts/rrr/compare_subspaces.py --config $(SUBSPACE_COMPARISON_CONFIG) $(OVERRIDES)
 
 ## Decode linguistic targets from saved RRR input subspaces
 ## Usage:
