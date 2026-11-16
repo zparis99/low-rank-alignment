@@ -288,6 +288,14 @@ HDF5 container while keeping plots as separately browsable PNG files.
 - `src/utils/language_features/` contains the reusable annotation pipeline and built-in
   providers.
 - `src/utils/atlas/` and `src/utils/plotting/` contain atlas and retained plotting code.
+  `bihemispheric_region_groups()` derives hemisphere-agnostic ROIs (STG, IFG, ...)
+  from `REGION_GROUPS`. `Artifact.load_rank_matrix(data_root=..., region=<ROI>)` in
+  `scripts/run_rrr.py` keeps only targets in that ROI via the dataset adapter's
+  `get_target_atlas_labels` (Podcast: MNI coordinates to the Destrieux volume atlas;
+  fMRI: each voxel takes the Destrieux label of the nearest mid-thickness vertex of its
+  subject's pia/white-matter surfaces; Brain Treebank is not yet supported). The `fmri`
+  adapter in `src/core/registry.py` also supplies fMRI voxel coordinates (subject-native
+  anatomical space; `data_root` is `data/deep-fMRI-dataset`).
 
 Brain Treebank high-gamma preprocessing supports common-average and shaft-Laplacian
 rereferencing. Common average remains the default. Laplacian caches and downstream

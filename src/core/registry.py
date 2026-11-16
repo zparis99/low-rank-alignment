@@ -267,6 +267,12 @@ class PodcastDatasetAdapter:
         coords[~np.isfinite(coords).all(axis=1)] = np.nan
         return coords
 
+    def get_target_atlas_labels(self, targets: pd.DataFrame, data_root: str) -> np.ndarray:
+        """Destrieux label per target from its MNI `x`, `y`, `z` columns ("" if none)."""
+        from src.utils.atlas.core import label_coordinates_with_volume_atlas
+
+        return label_coordinates_with_volume_atlas(targets[["x", "y", "z"]].to_numpy())
+
     def get_precomputed_epochs_path(
         self, subject_id: int, data_root: str, context: DatasetContext
     ) -> str:
@@ -935,6 +941,12 @@ class BrainTreebankDatasetAdapter:
                     coords[i] = lookup[name]
         return coords
 
+    def get_target_atlas_labels(self, targets: pd.DataFrame, data_root: str) -> np.ndarray:
+        raise NotImplementedError(
+            "Brain Treebank region labelling is undecided: the localization file's "
+            "Region column or labels from MNI coordinates"
+        )
+
     def _attach_electrode_coordinates(self, raw, subject_id: int, data_root: str):
         """Attach available Brain Treebank MNI coordinates to an MNE Raw."""
         import warnings
@@ -1276,3 +1288,109 @@ class BrainTreebankDatasetAdapter:
                 f"Brain Treebank runs require all selected subjects to share movie '{movie}'. "
                 f"Mismatched subjects: {details}"
             )
+
+
+@register_dataset("fmri")
+class FMRIDatasetAdapter:
+    """Target metadata for the LeBel et al. fMRI dataset (ds003020).
+
+    fMRI loading itself lives in `src/utils/shared/fmri.py`; this adapter only
+    exposes where each response column (voxel) sits in the subject's anatomy, so
+    that fMRI targets can be handled like iEEG electrodes.
+    """
+
+    name = "fmri"
+
+    @staticmethod
+    def _derivatives(data_root: str) -> str:
+        return os.path.join(data_root, "data", "ds003020", "derivatives")
+
+    @staticmethod
+    def _subject_name(subject) -> str:
+        text = str(subject)
+        return text if text.startswith("UTS") else f"UTS{int(text):02d}"
+
+    def _voxel_grid(self, subject: str, data_root: str):
+        """Return (flat voxel -> surface-space mm [n, 3]) for one subject.
+
+        Response columns follow the pycortex `mask_thick` volume flattened z-major
+        (Fortran order of the stored [x, y, z] array). The pycortex `coord` matrix
+        maps surface-space mm to voxel indices, so its inverse gives voxel centres.
+        """
+        import nibabel as nib
+
+        transform_dir = os.path.join(
+            self._derivatives(data_root), "pycortex-db", subject, "transforms",
+            f"{subject}_auto",
+        )
+        mask = nib.load(os.path.join(transform_dir, "mask_thick.nii.gz")).get_fdata() > 0
+        with open(os.path.join(transform_dir, "matrices.xfm")) as handle:
+            coord = np.asarray(json.load(handle)["coord"], dtype=float)
+        flat = np.flatnonzero(mask.ravel(order="F"))
+        ijk = np.stack(np.unravel_index(flat, mask.shape, order="F"), axis=1)
+        homogeneous = np.c_[ijk, np.ones(len(ijk))]
+        return (np.linalg.inv(coord) @ homogeneous.T)[:3].T
+
+    def get_electrode_coordinates(self, targets: pd.DataFrame, data_root: str) -> np.ndarray:
+        """Return [n, 3] x, y, z (mm) per target row (`subject`, `voxel_index`).
+
+        Coordinates are in each subject's own anatomical (pycortex surface) space,
+        not a shared template space, so they are only comparable within a subject.
+        """
+        coords = np.full((len(targets), 3), np.nan)
+        subjects = np.array([self._subject_name(s) for s in targets["subject"]])
+        voxels = targets["voxel_index"].to_numpy(dtype=int)
+        for subject in np.unique(subjects):
+            grid = self._voxel_grid(subject, data_root)
+            rows = np.flatnonzero(subjects == subject)
+            if voxels[rows].max() >= len(grid) or voxels[rows].min() < 0:
+                raise ValueError(
+                    f"{subject} has {len(grid)} cortical voxels but targets reference "
+                    f"voxel_index up to {voxels[rows].max()}"
+                )
+            coords[rows] = grid[voxels[rows]]
+        return coords
+
+    @staticmethod
+    def _load_surface_points(derivatives: str, subject: str, kind: str, hemi: str):
+        """Vertex positions of a pycortex surface, stored as .gii or (UTS02) .npz."""
+        import nibabel as nib
+
+        base = os.path.join(derivatives, "pycortex-db", subject, "surfaces",
+                            f"{kind}_{hemi}")
+        if os.path.exists(base + ".gii"):
+            return nib.load(base + ".gii").darrays[0].data
+        with np.load(base + ".npz") as archive:
+            return archive["pts"]
+
+    def get_target_atlas_labels(self, targets: pd.DataFrame, data_root: str) -> np.ndarray:
+        """Destrieux label per voxel: the nearest mid-thickness cortical vertex.
+
+        Needs the `x`, `y`, `z` columns from `get_electrode_coordinates`. The mesh is
+        the midpoint of each subject's pia and white-matter surfaces (the vertices
+        correspond one to one); labels come from that subject's FreeSurfer
+        `aparc.a2009s` annotation. Voxels whose nearest vertex is unlabelled get "".
+        """
+        import nibabel as nib
+        from nibabel.freesurfer import read_annot
+
+        from src.utils.atlas.core import label_voxel_positions_by_nearest_vertex
+
+        derivatives = self._derivatives(data_root)
+        labels = np.full(len(targets), "", dtype=object)
+        subjects = np.array([self._subject_name(s) for s in targets["subject"]])
+        positions = targets[["x", "y", "z"]].to_numpy(dtype=float)
+        for subject in np.unique(subjects):
+            surfaces, annotations = {}, {}
+            for side, hemi in (("L", "lh"), ("R", "rh")):
+                meshes = [self._load_surface_points(derivatives, subject, kind, hemi)
+                          for kind in ("pia", "wm")]
+                surfaces[side] = (meshes[0].astype(float) + meshes[1]) / 2
+                indices, _, names = read_annot(os.path.join(
+                    derivatives, "freesurfer_subjdir", subject, "label",
+                    f"{hemi}.aparc.a2009s.annot"))
+                annotations[side] = (indices, [n.decode() for n in names])
+            rows = np.flatnonzero(subjects == subject)
+            labels[rows] = label_voxel_positions_by_nearest_vertex(
+                positions[rows], surfaces, annotations)
+        return labels

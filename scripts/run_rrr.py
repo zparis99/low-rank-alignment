@@ -270,6 +270,8 @@ def _dataset_adapter_name(dataset):
         return "podcast"
     if dataset.startswith("brain-treebank-"):
         return "brain_treebank"
+    if dataset == "deep-fmri":
+        return "fmri"
     raise ValueError(f"no dataset adapter for Artifact dataset {dataset!r}")
 
 
@@ -688,7 +690,7 @@ class Artifact(ArtifactStore):
         return self
 
     def load_rank_matrix(self, method="rrr", *, metric=None, selectors=None,
-                         data_root=None):
+                         data_root=None, region=None):
         """Load per-target rank metrics as a single array (see `RankMatrix`).
 
         Returns [rank, fold, electrode, lag] for iEEG or [rank, fold, voxel] for
@@ -702,7 +704,15 @@ class Artifact(ArtifactStore):
         via the dataset adapter's `get_electrode_coordinates` (NaN where an electrode
         has none). `data_root` is the dataset's own root, as in its configs
         (`data/` for podcast, `data/brain-treebank` for Brain Treebank).
-        fMRI targets get no coordinates yet.
+        For fMRI, `data_root` is the toolbox root (`data/deep-fMRI-dataset`) and
+        coordinates are in each subject's own anatomical space (not MNI).
+
+        `region` keeps only targets inside one bihemispheric ROI named in
+        `bihemispheric_region_groups()` (for example "IFG"; requires `data_root`).
+        Each target gets an `atlas_label` column (Destrieux, "" when unlabelled).
+        Podcast labels come from MNI coordinates; fMRI voxels take the label of the
+        nearest mid-thickness cortical vertex of their subject. Brain Treebank is
+        not supported yet.
         """
         selectors = {"method": method, **(selectors or {})}
         manifests = self.load_collection("target_manifest", {})
@@ -719,13 +729,30 @@ class Artifact(ArtifactStore):
         matrix = assemble_rank_matrix(
             self.load_collection("rank_metrics", selectors), manifest, method, metric
         )
-        if data_root is not None and matrix.lags is not None:
+        if data_root is not None:
             targets = matrix.targets.copy()
             targets[["x", "y", "z"]] = get_dataset_adapter(
                 _dataset_adapter_name(self.dataset)
             ).get_electrode_coordinates(targets, str(data_root))
             matrix = matrix._replace(targets=targets)
+        if region is not None:
+            matrix = self._restrict_to_region(matrix, region, data_root)
         return matrix
+
+    def _restrict_to_region(self, matrix, region, data_root):
+        from src.utils.atlas.core import bihemispheric_region_groups
+
+        groups = bihemispheric_region_groups()
+        if region not in groups:
+            raise ValueError(f"unknown region {region!r}; choose from {sorted(groups)}")
+        if data_root is None:
+            raise ValueError("region filtering needs data_root for target coordinates")
+        adapter = get_dataset_adapter(_dataset_adapter_name(self.dataset))
+        targets = matrix.targets.copy()
+        targets["atlas_label"] = adapter.get_target_atlas_labels(targets, str(data_root))
+        keep = targets["atlas_label"].isin(groups[region]).to_numpy()
+        return matrix._replace(values=matrix.values[:, :, keep],
+                               targets=targets[keep].reset_index(drop=True))
 
     def save_artifacts(self, *, effective_config, upstream_identities,
                        plot=True, overwrite=False):

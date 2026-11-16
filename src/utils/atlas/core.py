@@ -453,3 +453,83 @@ def podcast_region_sets(
                  for name in names}
         for region in region_groups
     }
+
+
+def bihemispheric_region_groups(
+    region_groups: dict[str, list[str]] = REGION_GROUPS,
+) -> dict[str, frozenset[str]]:
+    """Hemisphere-agnostic ROI -> Destrieux labels (both hemispheres).
+
+    Each group's left-hemisphere labels are mirrored to the right. The lumped
+    `RIGHT` group in `REGION_GROUPS` exists only for the iEEG per-ROI figure and
+    is not an ROI, so it is skipped.
+    """
+    groups: dict[str, frozenset[str]] = {}
+    for name, labels in region_groups.items():
+        if name == "RIGHT":
+            continue
+        bases = {label.split(" ", 1)[1] for label in labels if label.startswith("L ")}
+        groups[name] = frozenset(f"{side} {base}" for base in bases for side in ("L", "R"))
+    return groups
+
+
+def label_coordinates_with_volume_atlas(
+    coords: np.ndarray, atlas_path: str | None = None
+) -> np.ndarray:
+    """Destrieux label (e.g. "L G_temporal_middle") for each MNI coordinate in mm.
+
+    Uses the nearest labelled atlas voxel. Rows with non-finite coordinates get "".
+    """
+    from nilearn import datasets, image as nli_image
+
+    coords = np.asarray(coords, dtype=float)
+    labels = np.full(len(coords), "", dtype=object)
+    finite = np.isfinite(coords).all(axis=1)
+    if not finite.any():
+        return labels
+    if atlas_path is None:
+        atlas_path = datasets.fetch_atlas_destrieux_2009()["maps"]
+    img = nli_image.load_img(atlas_path)
+    labels[finite] = _lookup_atlas_labels(
+        coords[finite], img.get_fdata().astype(int), img.affine, DESTRIEUX_2009_LABELS
+    )
+    labels[labels == "Background"] = ""
+    return labels
+
+
+def normalize_freesurfer_destrieux_name(name: str, hemisphere: str) -> str:
+    """FreeSurfer `a2009s` annotation name -> `DESTRIEUX_2009_LABELS` spelling.
+
+    FreeSurfer writes `G&S_paracentral` where the atlas lookup uses
+    `G_and_S_paracentral`. Names with no atlas counterpart (`Unknown`) map to "".
+    """
+    label = f"{hemisphere} {name.replace('&', '_and_')}"
+    return label if label in DESTRIEUX_2009_LABELS else ""
+
+
+def label_voxel_positions_by_nearest_vertex(
+    positions: np.ndarray,
+    surfaces: dict[str, np.ndarray],
+    annotations: dict[str, tuple[np.ndarray, list[str]]],
+) -> np.ndarray:
+    """Destrieux label of the nearest cortical vertex for each position.
+
+    `surfaces` maps "L"/"R" to a [n_vertices, 3] mesh (the caller supplies the
+    mid-thickness mesh) and `annotations` maps "L"/"R" to FreeSurfer
+    (per-vertex annotation index, annotation names). Positions and meshes share
+    one coordinate space. Vertices with no usable label give "".
+    """
+    vertices, vertex_labels = [], []
+    for side in ("L", "R"):
+        mesh = np.asarray(surfaces[side], dtype=float)
+        indices, names = annotations[side]
+        if len(indices) != len(mesh):
+            raise ValueError(
+                f"{side}: annotation has {len(indices)} vertices but the surface has {len(mesh)}"
+            )
+        lookup = np.array([normalize_freesurfer_destrieux_name(n, side) for n in names]
+                          + [""], dtype=object)
+        vertices.append(mesh)
+        vertex_labels.append(lookup[np.asarray(indices)])  # index -1 -> "" (last entry)
+    _, nearest = KDTree(np.vstack(vertices)).query(np.asarray(positions, dtype=float), k=1)
+    return np.concatenate(vertex_labels)[nearest]
