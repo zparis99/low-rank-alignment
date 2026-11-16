@@ -72,6 +72,14 @@ Each producer declares its own preferred selector order; undeclared selector
 keys sort alphabetically after those preferred keys. `load_artifacts(fields=...,
 selectors=...)` loads only requested values and returns the concrete Artifact
 instance.
+For RRR Artifacts, `load_rank_matrix(method, metric=None, selectors=None)` loads
+the per-target rank metrics as one `RankMatrix`: `values` is `[rank, fold, electrode,
+lag]` for iEEG or `[rank, fold, voxel]` for fMRI (fMRI internal results have no folds,
+so the fold axis has length 1), with `ranks`, `folds`, `targets` (row labels) and `lags`
+alongside. For iEEG, `data_root=` adds `x`, `y`, `z` (mm) columns to `targets`
+(NaN when an electrode has no coordinates) using the dataset adapter's
+`get_electrode_coordinates` (pass the dataset's own root, e.g. `data/brain-treebank`); fMRI gets none yet. Modes with several target sets, such as leave-one-subject-out, need
+`selectors` that pin one.
 
 Writes publish payloads and then update the manifest, with the physical codec and
 uncompressed size recorded for every selector entry. `run_rrr` and
@@ -210,3 +218,7 @@ The importable decoding facade is `scripts.run_language_decoding.Artifact`;
 
 Legacy manifests with a missing or null `upstreams` field are read as having no
 upstream dependencies. They remain incompatible with runs that declare an upstream.
+
+`run_rrr.Artifact.list_available(results_root="results", dataset=None, mode=None)` enumerates every saved RRR
+identity (mode, dataset, offset, model, layer, variant, `complete`) from the per-leaf
+variant indexes (optionally for one `dataset` and/or `mode`), sorted, for discovering which models, layers, and variants exist.

@@ -739,3 +739,59 @@ def decoding_aggregate(decoding):
                     "B. Cross-Dataset AUC Correlations", ha="center", va="bottom",
                     fontsize=15, weight="bold")
         return figure
+
+
+def roi_curves_figure(curves, region_sets, dataset, pair, *, fraction=.99, columns=3,
+                      lag_summary="mean"):
+    """Raw-correlation rank curves per ROI for one iEEG dataset and model layer.
+
+    `curves` is the frame from `load_electrode_curves`; `region_sets` maps each ROI
+    name to the {(subject, electrode)} pairs it contains. Each panel shows the
+    Fisher-mean RRR curve (thick), the PCA mean curve, one faint RRR line per
+    subject with electrodes in the ROI, and a dashed line (per method) at the rank where the
+    ROI's mean RRR and PCA curves first reach `fraction` of their own peak.
+    """
+    identity = pd.MultiIndex.from_frame(curves[["subject", "electrode"]])
+    rows = -(-len(region_sets) // columns)
+    with paper_style():
+        figure, axes = plt.subplots(rows, columns, figsize=(4.6 * columns, 3.4 * rows),
+                                    squeeze=False)
+        for ax, (region, members) in zip(axes.flat, region_sets.items()):
+            inside = curves[identity.isin(list(members))]
+            ax.set_title(region)
+            if inside.empty:
+                ax.text(.5, .5, "no significant electrodes", ha="center", va="center",
+                        transform=ax.transAxes, color="#64748b")
+                finish_axis(ax)
+                continue
+            rrr = inside[inside["method"] == "rrr"]
+            for _, subject in rrr.groupby("subject"):
+                line = subject.groupby("rank")["correlation"].apply(fisher_mean)
+                ax.plot(line.index, line.values, color=COLORS["rrr"], alpha=.3, linewidth=1)
+            for method in ("pca", "rrr"):
+                mean = (inside[inside["method"] == method]
+                        .groupby("rank")["correlation"].apply(fisher_mean))
+                ax.plot(mean.index, mean.values, marker="o", markersize=3.5,
+                        color=COLORS[method], linewidth=2.2 if method == "rrr" else 1.6,
+                        label=method.upper())
+                saturation = quantile_saturation_rank(
+                    mean.index.to_numpy(), mean.to_numpy()[:, None], fraction
+                )
+                if np.isfinite(saturation):
+                    ax.axvline(saturation, color=COLORS[method], linestyle="--",
+                               linewidth=1.4)
+            n_electrodes = inside[["subject", "electrode"]].drop_duplicates().shape[0]
+            ax.text(.97, .05, f"n={n_electrodes}", ha="right", va="bottom",
+                    transform=ax.transAxes, fontsize=11, color="#64748b")
+            ax.set_xscale("log", base=2)
+            ax.set(xlabel="Rank $k$", ylabel="r")
+            finish_axis(ax)
+        for ax in list(axes.flat)[len(region_sets):]:
+            ax.set_visible(False)
+        handles, labels = axes.flat[0].get_legend_handles_labels()
+        figure.legend(handles, labels, frameon=False, loc="upper right", ncol=2)
+        what = ("mean of electrode peak correlations" if lag_summary == "peak"
+                else "mean correlation")
+        figure.suptitle(f"{LABELS[dataset]} · {pair[0]} / layer {pair[1]} · {what} by ROI")
+        figure.tight_layout(rect=(0, 0, 1, .95))
+        return figure

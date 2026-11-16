@@ -8,6 +8,10 @@ See [reproduction.md](reproduction.md) for the ordered environment, data/resourc
 embedding, epoch, feature-label, analysis, result-check, and figure-export steps,
 including the external inputs not currently automated by this repository.
 
+See [the normalized-curves appendix](normalized_curves_appendix.md) for the
+notebook figures' performance and rank normalization, model-layer averaging,
+log-rank AUC, and quantile saturation calculations.
+
 ## Retained workflows
 
 The paper configuration set is limited to Podcast, Brain Treebank Cars 2, and
@@ -28,7 +32,15 @@ feature-generation, and result-checking tools. Shared implementation code in
   one Config and Artifact contract. Its `full_fit` mode fits a single reusable
   factor set on every selected row and significant target, without a held-out rank
   evaluation, for iEEG sources.
+  `shuffle_embeddings: true` (with `shuffle_seed`, internal mode only) is a null control:
+  it globally permutes word embeddings against the neural data before fitting and
+  writes to a separate `run_rrr_shuffled/` Artifact tree
+  (`Artifact(shuffled_embeddings=True)`; default false reads the usual `run_rrr/`).
 - `scripts/fmri/` contains fMRI embedding generation workflows.
+  `scripts/fmri/compute_noise_ceiling.py` writes per-voxel closed-form noise ceilings
+  (Schoppe et al. 2016: `signal_power`, `noise_power`, `cc_max` from the test-story
+  `individual_repeats`; 10 repeats for UTS01-03, 5 for UTS04-09; unmasked, NaN where
+  signal power is non-positive) to `results/fmri_noise_ceiling/<subject>.npz`.
 - `scripts/language-interpret/` contains the language-decoding implementation.
   Language decoding includes word-aligned and TR-aligned pre-FIR methods for fMRI,
   all published through the same Artifact client.
@@ -127,6 +139,17 @@ HDF5 container while keeping plots as separately browsable PNG files.
   minimum peaks of 0, 0.005, and 0.01 at a fixed 99% threshold.
   LOSO averages each subject's saturation rank
   within model layers.
+  A top-of-notebook switch (`lag_summary`) chooses how iEEG (electrode, lag) targets
+  become electrode values for every iEEG figure: `mean` Fisher-averages each
+  electrode's lags (default); `peak` Fisher-averages folds at each lag and then takes
+  the electrode's maximum over lags, so curves show the best-lag alignment ceiling.
+  fMRI and decoding are unaffected. Each mode has its own results cache
+  (`.final_plots_cache[_peak].pkl`); the export script always uses `mean`.
+  A per-ROI figure (iEEG only) shows raw mean RRR/PCA correlation by rank for the
+  selected model layer, per `REGION_GROUPS` ROI, with per-subject RRR lines and a
+  99%-of-peak saturation marker. It loads per-electrode curves on demand
+  (`load_electrode_curves`); Podcast ROIs come from the Destrieux atlas lookup on
+  electrode coordinates, Cars 2 ROIs from the localization file's `Region` column.
   Target-quantile plots retain the 5th, 10th, 25th, 50th, 75th, and 90th percentiles.
   Main analyses and sample-model selectors include random GPT-2 and GloVe
   alongside the trained models; there are no separate control appendix plots.

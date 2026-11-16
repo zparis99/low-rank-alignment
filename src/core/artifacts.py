@@ -63,6 +63,12 @@ def normalized_config(value: Any, *, drop_paths: bool = True) -> dict:
             for key, child in item.items():
                 if key in _OPERATIONAL_KEYS:
                     continue
+                # Shuffle-control fields are absent from pre-existing artifacts,
+                # so they only enter the identity when the control is enabled.
+                if key == "shuffle_embeddings" and child is False:
+                    continue
+                if key == "shuffle_seed" and not item.get("shuffle_embeddings"):
+                    continue
                 if key == "fmri_tr_pre_fir" and child is False:
                     continue
                 if drop_paths and (key.endswith("_root") or key.endswith("_dir") or key.endswith("_path")):
@@ -207,6 +213,8 @@ class ArtifactStore:
     SELECTOR_ORDER: ClassVar[tuple[str, ...]] = ()
     COMPACT_STORAGE: ClassVar[bool] = False
     CONTAINER_NAME: ClassVar[str] = "artifact.h5"
+    # Null-control Artifacts live under a separate "<SCRIPT>_shuffled" directory.
+    shuffled_embeddings: bool = False
 
     def _init_store(
         self,
@@ -232,7 +240,7 @@ class ArtifactStore:
 
     @property
     def identity(self) -> dict:
-        return {
+        identity = {
             "script": self.SCRIPT,
             "mode": self.mode,
             "dataset": self.dataset,
@@ -240,6 +248,9 @@ class ArtifactStore:
             "model": self.model,
             "layer": self.layer,
         }
+        if self.shuffled_embeddings:
+            identity["shuffled_embeddings"] = True
+        return identity
 
     def identity_record(self) -> dict:
         return {**self.identity, "variant": self.variant}
@@ -247,7 +258,7 @@ class ArtifactStore:
     def _leaf(self) -> Path:
         return (
             self.results_root
-            / self.SCRIPT
+            / (f"{self.SCRIPT}_shuffled" if self.shuffled_embeddings else self.SCRIPT)
             / self.mode
             / self.dataset
             / f"offset-{self.offset}"

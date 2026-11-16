@@ -1648,6 +1648,14 @@ def run_ieeg(config: RRRConfig, target_pca_dim: int | None = None):
     if enc.limit_to_glove or enc.model == "glove":
         word_in_glove = word_df["in_glove"]
 
+    if config.shuffle_embeddings:
+        from src.utils.shared.embeddings import shuffle_embedding_rows
+
+        print(f"Shuffling word embeddings (seed={config.shuffle_seed}) as null control")
+        aligned_embeddings = shuffle_embedding_rows(
+            aligned_embeddings, config.shuffle_seed, valid_rows=word_in_glove
+        )
+
     branch_kwargs = dict(
         config=config,
         enc=enc,

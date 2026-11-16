@@ -544,6 +544,49 @@ def columnwise_correlation(true: np.ndarray, predicted: np.ndarray) -> np.ndarra
     return np.nan_to_num(np.mean(true_z * pred_z, axis=0))
 
 
+def noise_ceiling(repeats: np.ndarray) -> dict[str, np.ndarray]:
+    """Per-voxel closed-form noise ceiling (Schoppe et al., 2016, Eq. 10-17).
+
+    ``repeats`` has shape (n_repeats, n_trs, n_voxels) with at least two repeats.
+    With TP the mean single-repeat variance over time and Var(mean) the variance
+    of the repeat average, ``SP = (N * Var(mean) - TP) / (N - 1)``, ``NP = TP - SP``
+    and ``CC_max = 1 / sqrt(1 + NP / (N * SP))``: the best possible correlation
+    with the N-repeat mean. Variances use ``ddof=0``, which cancels in CC_max.
+    ``CC_max`` is NaN where ``SP <= 0``. Nothing is clamped, masked, or aggregated
+    across voxels.
+    """
+    repeats = np.asarray(repeats)
+    if repeats.ndim != 3 or repeats.shape[0] < 2:
+        raise ValueError(
+            f"Expected (n_repeats >= 2, n_trs, n_voxels), got {repeats.shape}"
+        )
+    n = repeats.shape[0]
+    total_power = np.zeros(repeats.shape[2], dtype=np.float64)
+    for repeat in repeats:
+        total_power += np.var(repeat, axis=0, dtype=np.float64)
+    total_power /= n
+    mean = np.zeros(repeats.shape[1:], dtype=np.float64)
+    for repeat in repeats:
+        mean += repeat
+    mean /= n
+    mean_power = np.var(mean, axis=0)
+    signal_power = (n * mean_power - total_power) / (n - 1)
+    noise_power = total_power - signal_power
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cc_max = np.where(
+            signal_power > 0,
+            1.0 / np.sqrt(1.0 + noise_power / (n * signal_power)),
+            np.nan,
+        )
+    return {
+        "signal_power": signal_power.astype(np.float32),
+        "noise_power": noise_power.astype(np.float32),
+        "cc_max": cc_max.astype(np.float32),
+        "n_repeats": np.asarray(n),
+        "n_trs": np.asarray(repeats.shape[1]),
+    }
+
+
 def target_manifest(subjects: list[str], masks: dict[str, np.ndarray]) -> pd.DataFrame:
     rows = []
     for subject in subjects:

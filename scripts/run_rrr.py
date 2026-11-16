@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import io
 from copy import deepcopy
+from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,7 @@ from src.core.config import (
     ScriptMode,
     SignificanceSelectionConfig,
 )
-from src.core.registry import resolve_dataset_context
+from src.core.registry import get_dataset_adapter, resolve_dataset_context
 from src.utils.shared.config import (
     expand_fmri_layer_configs,
     expand_per_model_layer_configs,
@@ -68,6 +69,10 @@ class Config:
     views: list[dict] = field(default_factory=list)
     multi_view_name: str | None = None
     subspace_aggregation: str | None = None
+    # Null control: randomly permute which word's embedding is paired with which
+    # neural response (internal mode only). Results get a distinct Artifact variant.
+    shuffle_embeddings: bool = False
+    shuffle_seed: int = 0
     ieeg: dict | None = field(default_factory=dict)
     fmri: dict | None = None
 
@@ -98,6 +103,8 @@ class Config:
             raise ValueError(f"mode={self.mode.value} requires rrr_source")
         if self.mode == ScriptMode.MULTI_VIEW and not self.multi_view_name:
             raise ValueError("mode=multi_view requires multi_view_name")
+        if self.shuffle_embeddings and self.mode != ScriptMode.INTERNAL:
+            raise ValueError("shuffle_embeddings is supported only for mode=internal")
         if not self.rank_grid or any(int(rank) < 1 for rank in self.rank_grid):
             raise ValueError("rank_grid must contain positive integers")
 
@@ -124,6 +131,8 @@ class Config:
             "rank_grid": self.rank_grid,
             "significance_selection": deepcopy(self.significance_selection),
             "subspace_aggregation": aggregation,
+            "shuffle_embeddings": self.shuffle_embeddings,
+            "shuffle_seed": self.shuffle_seed,
         })
         converted_views = []
         for view in self.views:
@@ -184,6 +193,86 @@ class UnitSelector:
         return {key: value for key, value in asdict(self).items() if value is not None}
 
 
+class RankMatrix(NamedTuple):
+    """Per-target rank metrics laid out as one array.
+
+    `values` is [rank, fold, electrode, lag] for iEEG or [rank, fold, voxel] for
+    fMRI. `targets` labels the electrode/voxel axis (row i describes
+    `values[:, :, i]`); `lags` holds lag seconds for iEEG and is None for fMRI.
+    `folds` lists the stored fold selectors (None when results have no folds, which
+    gives a fold axis of length 1). Combinations that were not computed are NaN.
+    """
+
+    values: np.ndarray
+    ranks: np.ndarray
+    folds: list
+    targets: pd.DataFrame
+    lags: np.ndarray | None
+
+
+_RANK_METRIC_CANDIDATES = {
+    "rrr": ("nr_orth_corr_per_target", "corr_per_target"),
+    "pca": ("pca_corr_per_target", "corr_per_target"),
+}
+
+
+def assemble_rank_matrix(rank_metrics, manifest, method, metric=None):
+    """Stack per-target rank metrics into a RankMatrix (pure; no I/O)."""
+    entries = {}
+    for encoded, metrics in rank_metrics.items():
+        selector = dict(encoded)
+        if selector.get("method") != method or "rank" not in selector:
+            continue
+        name = metric or next((c for c in _RANK_METRIC_CANDIDATES.get(method, ())
+                               if c in metrics), None)
+        if name is None or name not in metrics:
+            continue
+        entries[(int(selector["rank"]), selector.get("fold"))] = np.asarray(
+            metrics[name], dtype=float
+        ).reshape(-1)
+    if not entries:
+        raise ValueError(f"no per-target rank metrics found for method {method!r}"
+                         + (f" and metric {metric!r}" if metric else ""))
+    for key, values in entries.items():
+        if len(values) != len(manifest):
+            raise ValueError(
+                f"rank {key[0]} fold {key[1]} has {len(values)} targets but the "
+                f"manifest has {len(manifest)}; narrow `selectors` to one target set"
+            )
+    ranks = sorted({rank for rank, _ in entries})
+    folds = sorted({fold for _, fold in entries}, key=lambda f: (f is None, f))
+    if "lag_index" in manifest:
+        electrode_id = manifest.groupby(["subject", "electrode"], sort=False).ngroup().to_numpy()
+        lag_id = manifest["lag_index"].to_numpy()
+        shape = (len(ranks), len(folds), int(electrode_id.max()) + 1, int(lag_id.max()) + 1)
+        targets = manifest.drop_duplicates(["subject", "electrode"])[
+            ["subject", "electrode"]].reset_index(drop=True)
+        lags = (manifest.drop_duplicates("lag_index").sort_values("lag_index")["lag"]
+                .to_numpy())
+    else:
+        shape = (len(ranks), len(folds), len(manifest))
+        targets = manifest[[c for c in ("subject", "voxel_index") if c in manifest]
+                           ].reset_index(drop=True)
+        lags = None
+    values = np.full(shape, np.nan)
+    for (rank, fold), array in entries.items():
+        i, j = ranks.index(rank), folds.index(fold)
+        if lags is None:
+            values[i, j] = array
+        else:
+            values[i, j][electrode_id, lag_id] = array
+    return RankMatrix(values, np.asarray(ranks), folds, targets, lags)
+
+
+def _dataset_adapter_name(dataset):
+    """Map an Artifact dataset identity to its registered dataset adapter name."""
+    if dataset == "podcast":
+        return "podcast"
+    if dataset.startswith("brain-treebank-"):
+        return "brain_treebank"
+    raise ValueError(f"no dataset adapter for Artifact dataset {dataset!r}")
+
+
 class Artifact(ArtifactStore):
     """Unified storage and loading contract for iEEG and fMRI RRR results."""
 
@@ -209,7 +298,8 @@ class Artifact(ArtifactStore):
     def __init__(self, *, mode="internal", dataset="podcast", offset=0,
                  model="gpt2-xl", layer=24, variant=None,
                  significance_selection=None, subspace_aggregation=None,
-                 rereference=None, results_root="results"):
+                 rereference=None, results_root="results",
+                 shuffled_embeddings=False):
         if variant is not None and (
             significance_selection is not None
             or subspace_aggregation is not None
@@ -244,6 +334,7 @@ class Artifact(ArtifactStore):
             )
         self._init_store(mode=mode, dataset=dataset, offset=offset, model=model,
                          layer=layer, variant=variant, results_root=results_root)
+        self.shuffled_embeddings = bool(shuffled_embeddings)
         if mode == "full_fit":
             self.FIELD_CONTRACT = {
                 **type(self).FIELD_CONTRACT,
@@ -295,6 +386,45 @@ class Artifact(ArtifactStore):
         return manifest
 
     @classmethod
+    def list_available(cls, results_root="results", dataset=None, mode=None):
+        """Return every saved RRR Artifact identity under ``results_root``.
+
+        Each entry is a dict with ``mode``, ``dataset``, ``offset``, ``model``,
+        ``layer`` (``None`` for ``layer-none``), ``variant``, and ``complete``,
+        sorted by those fields. Entries come from the per-leaf variant index.
+        If ``dataset`` (e.g. ``"podcast"``) or ``mode`` (e.g. ``"internal"``) is
+        given, only matching entries are listed.
+        """
+        base = Path(results_root) / cls.SCRIPT
+        entries = []
+        pattern = f"{mode or '*'}/{dataset or '*'}/offset-*/*/layer-*/manifest.json"
+        for index_path in base.glob(pattern):
+            layer_dir = index_path.parent
+            model_dir = layer_dir.parent
+            offset_dir = model_dir.parent
+            dataset_dir = offset_dir.parent
+            mode_dir = dataset_dir.parent
+            layer = layer_dir.name.removeprefix("layer-")
+            index = cls._read_json(index_path, default={})
+            for variant, info in index.get("variants", {}).items():
+                entries.append({
+                    "mode": mode_dir.name,
+                    "dataset": dataset_dir.name,
+                    "offset": int(offset_dir.name.removeprefix("offset-")),
+                    "model": model_dir.name,
+                    "layer": None if layer == "none" else int(layer),
+                    "variant": variant,
+                    "complete": bool(info.get("complete")),
+                })
+        return sorted(
+            entries,
+            key=lambda e: (
+                e["mode"], e["dataset"], e["offset"], e["model"],
+                -1 if e["layer"] is None else e["layer"], e["variant"],
+            ),
+        )
+
+    @classmethod
     def from_ieeg_config(cls, config, dataset_context):
         enc = config.encoding
         is_multi_view = config.mode == ScriptMode.MULTI_VIEW
@@ -323,6 +453,7 @@ class Artifact(ArtifactStore):
             ),
             rereference=(selected_rereference if is_multi_view else None),
             results_root=config.results_root,
+            shuffled_embeddings=config.shuffle_embeddings,
         )
         artifact.variant_extras = {}
         rereference = selected_rereference
@@ -348,6 +479,7 @@ class Artifact(ArtifactStore):
             significance_selection=(config.significance_selection if is_multi_view else None),
             subspace_aggregation=(config.subspace_aggregation if is_multi_view else None),
             results_root=config.results_root,
+            shuffled_embeddings=config.shuffle_embeddings,
         )
         artifact.variant_extras = {
             "input_scaling": "pooled-training-stories-v1",
@@ -554,6 +686,46 @@ class Artifact(ArtifactStore):
             setattr(self, name, self.load_field(name) if name in scalar
                     else self.load_collection(name, selectors))
         return self
+
+    def load_rank_matrix(self, method="rrr", *, metric=None, selectors=None,
+                         data_root=None):
+        """Load per-target rank metrics as a single array (see `RankMatrix`).
+
+        Returns [rank, fold, electrode, lag] for iEEG or [rank, fold, voxel] for
+        fMRI. `metric` overrides the default per-target metric (RRR:
+        `nr_orth_corr_per_target`, PCA: `pca_corr_per_target`, fMRI:
+        `corr_per_target`). Modes whose results span several target sets (for
+        example leave-one-subject-out) need `selectors` that pin one of them, such as
+        `{"held_out_subject": "3", "loso_phase": "transfer"}`.
+
+        For iEEG, passing `data_root` adds `x`, `y`, `z` (mm) columns to `targets`
+        via the dataset adapter's `get_electrode_coordinates` (NaN where an electrode
+        has none). `data_root` is the dataset's own root, as in its configs
+        (`data/` for podcast, `data/brain-treebank` for Brain Treebank).
+        fMRI targets get no coordinates yet.
+        """
+        selectors = {"method": method, **(selectors or {})}
+        manifests = self.load_collection("target_manifest", {})
+        wanted = {k: str(v) for k, v in selectors.items()
+                  if k in {"method", "loso_phase", "held_out_subject"}}
+        manifest = next(
+            (frame for encoded, frame in manifests.items()
+             if all({k: str(v) for k, v in dict(encoded).items()}.get(k) == v
+                    for k, v in wanted.items())),
+            manifests.get(()),
+        )
+        if manifest is None:
+            raise ValueError("no target manifest matches the requested selectors")
+        matrix = assemble_rank_matrix(
+            self.load_collection("rank_metrics", selectors), manifest, method, metric
+        )
+        if data_root is not None and matrix.lags is not None:
+            targets = matrix.targets.copy()
+            targets[["x", "y", "z"]] = get_dataset_adapter(
+                _dataset_adapter_name(self.dataset)
+            ).get_electrode_coordinates(targets, str(data_root))
+            matrix = matrix._replace(targets=targets)
+        return matrix
 
     def save_artifacts(self, *, effective_config, upstream_identities,
                        plot=True, overwrite=False):

@@ -10,7 +10,7 @@ import pandas as pd
 
 from src.utils.plotting.final_axes import finish_axis, paper_style
 from src.utils.plotting.final_data import (
-    DATASETS, LABELS, _collapse, _manifest_for, _metric_name, _rrr,
+    DATASETS, LABELS, _electrode_values, _manifest_for, _metric_name, _rrr, _summary_for,
 )
 from src.utils.rrr.plot_metrics import (
     fisher_mean, normalized_quantile_curve, quantile_saturation_rank,
@@ -18,7 +18,7 @@ from src.utils.rrr.plot_metrics import (
 
 
 @lru_cache(maxsize=12)
-def load_target_curves(results_root, dataset, model, layer):
+def load_target_curves(results_root, dataset, model, layer, lag_summary="mean"):
     """Load one model layer; preserve target identities across evaluated ranks."""
     artifact = _rrr(results_root, "internal", dataset, model, layer).load_artifacts(
         ["rank_metrics", "target_manifest"]
@@ -31,9 +31,10 @@ def load_target_curves(results_root, dataset, model, layer):
             continue
         name = _metric_name(dataset, method)
         if name in metrics:
-            values[(method, int(rank))].append(
-                _collapse(metrics[name], _manifest_for(artifact, {"method": method}))
-            )
+            values[(method, int(rank))].append(metrics[name])
+    mode = _summary_for(dataset, lag_summary)
+    values = {key: _electrode_values(folds, _manifest_for(artifact, {"method": key[0]}), mode)
+              for key, folds in values.items()}
     curves = {}
     for method in ("rrr", "pca"):
         ranks = sorted(rank for item_method, rank in values if item_method == method)
@@ -59,13 +60,13 @@ def target_progress(ranks, matrix, performance=.99, coverage=.90):
     return np.asarray(normalized), crossings, float(hit_rank)
 
 
-def target_saturation_grid(results_root, selected_pair):
+def target_saturation_grid(results_root, selected_pair, lag_summary="mean"):
     """Show every eligible internal target and the fraction reaching 99% of peak."""
     rows = []
     with paper_style():
         figure, axes = plt.subplots(3, 2, figsize=(14, 12))
         for row, dataset in enumerate(DATASETS):
-            curves = load_target_curves(results_root, dataset, *selected_pair)
+            curves = load_target_curves(results_root, dataset, *selected_pair, lag_summary)
             for col, method in enumerate(("rrr", "pca")):
                 ax = axes[row, col]
                 value = curves.get(method)

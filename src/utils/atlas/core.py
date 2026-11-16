@@ -405,3 +405,51 @@ def build_electrode_region_map(
         per_subject_data[sub_id] = (raw.ch_names, coords)
 
     return _build_region_map_from_arrays(per_subject_data, atlas_image, affine, region_groups)
+
+
+def build_brain_treebank_region_map(
+    data_root: str,
+    region_groups: dict[str, list[str]],
+    *,
+    left_hemisphere_code: int,
+) -> dict[str, set[tuple[int, str]]]:
+    """Group Brain Treebank electrodes into regions from its localization file.
+
+    The localization CSV carries a Destrieux region name (without hemisphere) and
+    a numeric hemisphere per electrode. `left_hemisphere_code` states which
+    numeric value means left; any other value is treated as right. Returns
+    {region_name: {(subject_id, electrode_name)}}.
+    """
+    import os
+    import re
+
+    import pandas as pd
+
+    table = pd.read_csv(os.path.join(data_root, "localization", "elec_coords_full.csv"))
+    side = np.where(table["Hemisphere"] == left_hemisphere_code, "L", "R")
+    labels = [f"{s} {region}" for s, region in zip(side, table["Region"])]
+    subjects = table["Subject"].astype(str).str.removeprefix("sub_").astype(int)
+    names = [re.sub(r"[#*]", "", str(name)) for name in table["Electrode"]]
+    grouped = group_electrodes_by_region(
+        [f"{sub}|{name}" for sub, name in zip(subjects, names)], labels, region_groups
+    )
+    return {
+        region: {(int(item.split("|", 1)[0]), item.split("|", 1)[1])
+                 for item in grouped.get(region, [])}
+        for region in region_groups
+    }
+
+
+def podcast_region_sets(
+    subject_ids: list[int],
+    data_root: str,
+    region_groups: dict[str, list[str]],
+    atlas_path: str | None = None,
+) -> dict[str, set[tuple[int, str]]]:
+    """Podcast regions as {region_name: {(subject_id, electrode_name)}}."""
+    by_region = build_electrode_region_map(subject_ids, data_root, region_groups, atlas_path)
+    return {
+        region: {(sub, name) for sub, names in by_region.get(region, {}).items()
+                 for name in names}
+        for region in region_groups
+    }

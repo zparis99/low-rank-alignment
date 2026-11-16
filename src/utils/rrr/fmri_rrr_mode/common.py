@@ -440,6 +440,17 @@ def load_stimulus_data(config, train_stories, test_stories, groups):
             limit_to_glove=config.fmri.limit_to_glove,
             glove_dim=config.fmri.glove_dim,
         )
+    if config.shuffle_embeddings:
+        from src.utils.shared.embeddings import shuffle_embedding_rows
+
+        print(f"Shuffling word embeddings (seed={config.shuffle_seed}) as null control",
+              flush=True)
+        sizes = [len(embeddings[story]) for story in all_stories]
+        pooled = shuffle_embedding_rows(
+            np.concatenate([embeddings[story] for story in all_stories]),
+            config.shuffle_seed,
+        )
+        embeddings = dict(zip(all_stories, np.split(pooled, np.cumsum(sizes)[:-1])))
     ambient_dim = next(iter(embeddings.values())).shape[1]
     with _timed("Lanczos-align all stories"):
         aligned = align_fmri_stimuli(

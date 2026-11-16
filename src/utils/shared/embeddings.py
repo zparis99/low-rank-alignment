@@ -255,3 +255,23 @@ def get_gpt2_xl_embeddings(
     word_df = _to_word_level_df(transcript_df)
 
     return aligned_embeddings, word_df
+
+
+def shuffle_embedding_rows(embeddings, seed: int, valid_rows=None):
+    """Return ``embeddings`` with rows randomly permuted (null-control shuffle).
+
+    The permutation is applied to the word axis only, so the embedding
+    distribution is unchanged while the word-to-neural pairing is destroyed.
+    When ``valid_rows`` (boolean mask) is given, only rows inside it are permuted
+    among themselves, so every row later selected as valid still receives a real
+    embedding.
+    """
+    values = np.asarray(embeddings)
+    rng = np.random.default_rng(int(seed))
+    if valid_rows is None:
+        order = rng.permutation(len(values))
+    else:
+        positions = np.flatnonzero(np.asarray(valid_rows, dtype=bool))
+        order = np.arange(len(values))
+        order[positions] = rng.permutation(positions)
+    return values[order]

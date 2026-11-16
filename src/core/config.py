@@ -269,6 +269,9 @@ class RRRConfig:
         default_factory=list
     )
     subspace_aggregation: str | None = None
+    # Null control: permute which word's embedding pairs with which neural response.
+    shuffle_embeddings: bool = False
+    shuffle_seed: int = 0
 
     # Full-model banded ridge used by mode=multi_view.
     banded_ridge_alphas: list[float] | None = None
@@ -1001,6 +1004,8 @@ class FMRICrossDatasetRRRConfig:
     )
     source_mode: str = "cross_dataset"
     subspace_aggregation: str | None = None
+    shuffle_embeddings: bool = False
+    shuffle_seed: int = 0
     rrr_svd_on_cpu: bool = False
     rrr_use_low_rank_svd: bool = False
     rrr_low_rank_svd_seed: int = 0

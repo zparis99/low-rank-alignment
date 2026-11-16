@@ -246,6 +246,27 @@ class PodcastDatasetAdapter:
 
         return raw
 
+    def get_electrode_coordinates(self, targets: pd.DataFrame, data_root: str) -> np.ndarray:
+        """Return [n, 3] x, y, z (mm) per target row (`subject`, `electrode`); NaN if unknown."""
+        import mne
+        from mne_bids import BIDSPath
+
+        coords = np.full((len(targets), 3), np.nan)
+        subjects = targets["subject"].astype(int).to_numpy()
+        for sub in np.unique(subjects):
+            path = BIDSPath(
+                root=os.path.join(data_root, "derivatives/ecogprep"),
+                subject=f"{sub:02}", task="podcast", datatype="ieeg",
+                description="highgamma", suffix="ieeg", extension=".fif",
+            )
+            raw = mne.io.read_raw_fif(path, preload=False, verbose=False)
+            lookup = {name: ch["loc"][:3] * 1000
+                      for name, ch in zip(raw.ch_names, raw.info["chs"])}
+            for i in np.flatnonzero(subjects == sub):
+                coords[i] = lookup.get(targets["electrode"].iloc[i], np.nan)
+        coords[~np.isfinite(coords).all(axis=1)] = np.nan
+        return coords
+
     def get_precomputed_epochs_path(
         self, subject_id: int, data_root: str, context: DatasetContext
     ) -> str:
@@ -870,6 +891,50 @@ class BrainTreebankDatasetAdapter:
             )
         return raw
 
+    def _subject_coordinate_lookup_mm(self, subject_id: int, data_root: str) -> dict:
+        """Map normalized electrode name -> finite MNI (x, y, z) in mm for one subject."""
+        localization_path = os.path.join(
+            data_root, "localization", "elec_coords_full.csv"
+        )
+        localization = pd.read_csv(localization_path)
+        required = {"Subject", "Electrode", "X", "Y", "Z"}
+        missing_columns = required - set(localization.columns)
+        if missing_columns:
+            raise ValueError(
+                "Brain Treebank localization file missing columns "
+                f"{sorted(missing_columns)}: {localization_path}"
+            )
+
+        subject_rows = localization[
+            localization["Subject"].astype(str) == f"sub_{subject_id}"
+        ]
+        lookup = {}
+        for row in subject_rows.to_dict("records"):
+            coords_mm = np.asarray([row["X"], row["Y"], row["Z"]], dtype=float)
+            if not np.all(np.isfinite(coords_mm)):
+                continue
+            normalized_name = re.sub(r"[#*]", "", str(row["Electrode"]))
+            if normalized_name in lookup:
+                raise ValueError(
+                    "Duplicate Brain Treebank localization entry for "
+                    f"subject {subject_id}, electrode {normalized_name}."
+                )
+            lookup[normalized_name] = coords_mm
+        return lookup
+
+    def get_electrode_coordinates(self, targets: pd.DataFrame, data_root: str) -> np.ndarray:
+        """Return [n, 3] x, y, z (mm) per target row (`subject`, `electrode`); NaN if unknown."""
+        coords = np.full((len(targets), 3), np.nan)
+        subjects = targets["subject"].astype(int).to_numpy()
+        electrodes = targets["electrode"].to_numpy()
+        for sub in np.unique(subjects):
+            lookup = self._subject_coordinate_lookup_mm(int(sub), data_root)
+            for i in np.flatnonzero(subjects == sub):
+                name = re.sub(r"[#*]", "", str(electrodes[i]))
+                if name in lookup:
+                    coords[i] = lookup[name]
+        return coords
+
     def _attach_electrode_coordinates(self, raw, subject_id: int, data_root: str):
         """Attach available Brain Treebank MNI coordinates to an MNE Raw."""
         import warnings
@@ -886,30 +951,12 @@ class BrainTreebankDatasetAdapter:
             )
             return raw
 
-        localization = pd.read_csv(localization_path)
-        required = {"Subject", "Electrode", "X", "Y", "Z"}
-        missing_columns = required - set(localization.columns)
-        if missing_columns:
-            raise ValueError(
-                "Brain Treebank localization file missing columns "
-                f"{sorted(missing_columns)}: {localization_path}"
-            )
-
-        subject_rows = localization[
-            localization["Subject"].astype(str) == f"sub_{subject_id}"
-        ].copy()
-        coordinate_lookup = {}
-        for row in subject_rows.to_dict("records"):
-            coords_mm = np.asarray([row["X"], row["Y"], row["Z"]], dtype=float)
-            if not np.all(np.isfinite(coords_mm)):
-                continue
-            normalized_name = re.sub(r"[#*]", "", str(row["Electrode"]))
-            if normalized_name in coordinate_lookup:
-                raise ValueError(
-                    "Duplicate Brain Treebank localization entry for "
-                    f"subject {subject_id}, electrode {normalized_name}."
-                )
-            coordinate_lookup[normalized_name] = coords_mm / 1000.0
+        coordinate_lookup = {
+            name: coords_mm / 1000.0
+            for name, coords_mm in self._subject_coordinate_lookup_mm(
+                subject_id, data_root
+            ).items()
+        }
 
         ch_pos = {}
         for ch_name in raw.ch_names:

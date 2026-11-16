@@ -650,3 +650,36 @@ def test_cross_dataset_completed_resume_skips_embeddings_and_responses(
     assert results[["method", "rank"]].to_dict("records") == [
         {"method": "rrr", "rank": 1}
     ]
+
+
+def test_noise_ceiling_matches_schoppe_formulas():
+    from itertools import combinations
+
+    from src.utils.shared.fmri import noise_ceiling
+
+    rng = np.random.default_rng(0)
+    signal = rng.normal(size=(40, 3))
+    repeats = signal[None] + rng.normal(size=(5, 40, 3))
+    result = noise_ceiling(repeats)
+    n = 5
+    # Eq. 29: SP is the mean pairwise covariance between repeats.
+    covs = [
+        [np.cov(repeats[i, :, v], repeats[j, :, v], ddof=0)[0, 1]
+         for i, j in combinations(range(n), 2)]
+        for v in range(3)
+    ]
+    expected_sp = np.mean(covs, axis=1)
+    np.testing.assert_allclose(result["signal_power"], expected_sp, rtol=1e-4)
+    mean_var = repeats.mean(0).var(0)
+    # CC_max^2 = SP / Var(mean of repeats)
+    np.testing.assert_allclose(result["cc_max"] ** 2, expected_sp / mean_var, rtol=1e-4)
+
+
+def test_noise_ceiling_nan_without_signal():
+    from src.utils.shared.fmri import noise_ceiling
+
+    rng = np.random.default_rng(1)
+    repeats = rng.normal(size=(2, 30, 200))
+    result = noise_ceiling(repeats)
+    assert np.isnan(result["cc_max"][result["signal_power"] <= 0]).all()
+    assert np.isfinite(result["cc_max"][result["signal_power"] > 0]).all()
