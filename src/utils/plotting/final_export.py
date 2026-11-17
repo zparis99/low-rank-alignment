@@ -317,7 +317,9 @@ def main(argv=None):
         if pair not in pairs:
             available = ", ".join(f"{model}/{'none' if layer is None else layer}"
                                   for model, layer in pairs) or "none"
-            parser.error(f"Unavailable {label} example {pair}. Available model/layer pairs: {available}")
+            shown = "".join(f"\n  {gap}" for gap in data[8][:5])
+            parser.error(f"Unavailable {label} example {pair}. Available model/layer pairs: {available}"
+                         + (f"\nFirst of {len(data[8])} result gaps:{shown}" if data[8] else ""))
     print(f"Examples: internal={example_pair}, LOSO={loso_pair}", flush=True)
     print(f"Missing or incomplete results: {len(data[8])}; exporting available results.", flush=True)
     if not args.all:
