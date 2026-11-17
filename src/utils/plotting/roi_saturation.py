@@ -74,7 +74,7 @@ def load_roi_curves(results_root, data_roots, regions=None, pairs=PAIRS,
 def _panel_title(dataset, count):
     """Dataset name with the number of targets in the region (voxels for fMRI, else electrodes)."""
     unit = "voxels" if dataset == "fmri" else "electrodes"
-    return f"{LABELS[dataset]} (n = {count:,} {unit})"
+    return f"{LABELS[dataset]}, n = {count:,} {unit}"
 
 
 def _grid(regions, title):

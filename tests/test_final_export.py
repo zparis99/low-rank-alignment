@@ -5,6 +5,13 @@ import pytest
 from src.utils.plotting import final_data, final_export
 
 
+@pytest.fixture(autouse=True)
+def _intervals(monkeypatch):
+    """Bootstrap intervals are computed once per data set (main and raw fMRI) and passed through."""
+    monkeypatch.setattr(final_export, "bootstrap_intervals",
+                        lambda root, explained_variance, **kwargs: ("intervals", kwargs))
+
+
 def _data():
     quantiles = {(dataset, model, layer, method): None
                  for dataset in final_data.DATASETS
@@ -35,7 +42,7 @@ def test_example_selection(monkeypatch, tmp_path, arguments, internal, loso):
     monkeypatch.setattr(final_export, "export_figures", lambda *args: calls.append(args))
     final_export.main(["--output-dir", str(tmp_path), *arguments])
     assert calls == [(data, tmp_path, ["pdf", "png", "svg"], internal, loso,
-                      "explained_variance", "shuffled")]
+                      "explained_variance", "shuffled", ("intervals", {}))]
 
 
 def test_saturation_mode_argument(monkeypatch, tmp_path):
@@ -45,6 +52,7 @@ def test_saturation_mode_argument(monkeypatch, tmp_path):
     monkeypatch.setattr(final_export, "export_figures", lambda *args: calls.append(args))
     final_export.main(["--output-dir", str(tmp_path), "--saturation-mode", "quantile"])
     assert calls[0][5] == "quantile"
+    assert calls[0][7] is None  # the quantile appendix has no intervals
 
 
 def test_all_exports_every_appendix(monkeypatch, tmp_path):
@@ -55,10 +63,12 @@ def test_all_exports_every_appendix(monkeypatch, tmp_path):
     monkeypatch.setattr(final_data, "load_shuffled_internal_data", lambda root: "shuffled")
     calls = []
     monkeypatch.setattr(final_export, "export_figures",
-                        lambda *args: calls.append(args) or [])
+                        lambda *args, **kwargs: calls.append((*args, kwargs)) or [])
     final_export.main(["--output-dir", str(tmp_path), "--all"])
     assert [call[5] for call in calls] == ["explained_variance", "quantile", "raw_fmri"]
     assert calls[0][6] == "shuffled"
+    assert calls[0][7] == ("intervals", {})
+    assert calls[2][-1] == {"intervals": ("intervals", {"fmri_noise_normalized": False})}
     assert loads == [{}, {"fmri_noise_normalized": False}]
 
 

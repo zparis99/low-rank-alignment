@@ -31,7 +31,8 @@ from src.utils.rrr.plot_metrics import (
 
 DATASETS = {"podcast": "podcast", "cars-2": "brain-treebank-cars-2", "fmri": "deep-fmri"}
 QUANTILES = (.05, .10, .25, .50, .75, .90)
-LABELS = {"podcast": "Podcast", "cars-2": "Cars 2", "fmri": "fMRI"}
+# Dataset names with their recording modality, as shown in every figure title.
+LABELS = {"podcast": "Podcast (ECoG)", "cars-2": "Cars 2 (sEEG)", "fmri": "Moth (fMRI)"}
 PAIRS = tuple((model, layer) for model, layers in MODEL_LAYERS.values() for layer in layers)
 FMRI_VARIANT = "input_scaling-pooled-training-stories-v1"
 CC_MAX_FLOOR = 0.25  # noise ceilings below this are floored (as in the fMRI histograms)

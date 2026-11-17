@@ -190,7 +190,7 @@ def subspace_consistency_figure(data, sample_model, sample_layer):
                 color, linestyle = styles[label]
                 ax.plot(group["rank"], group["overlap"], marker="o", markersize=5, color=color,
                         linestyle=linestyle, linewidth=2,
-                        label=label.replace(first, LABELS[first]).replace(second, LABELS[second]))
+                        label=label.replace(f"({first})", f"[{LABELS[first]}]").replace(f"({second})", f"[{LABELS[second]}]"))
             ax.plot(ranks, chance, label="Chance ($r/d$)", **CHANCE)
             _rank_axis(ax)
             ax.set_xlabel("Rank $k$")

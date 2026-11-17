@@ -121,54 +121,24 @@ def _(loso_quantiles, mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    color_by_model = mo.ui.radio(
-        options=["Default", "By model"], value="Default", inline=True,
-        label="Color points in distribution plots:",
-    )
-    color_by_model
-    return (color_by_model,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    show_ci = mo.ui.radio(
-        options=["Off", "On"], value="Off", inline=True,
-        label="Saturation-rank 95% bootstrap CIs (whiskers on model means):",
-    )
-    show_ci
-    return (show_ci,)
-
-
-@app.cell(hide_code=True)
-def _(
-    explained_variance,
-    repo_root,
-    results_root,
-    roi_names,
-    show_ci,
-    subspace_data,
-):
+def _(explained_variance, repo_root, results_root, roi_names, subspace_data):
     from src.utils.plotting.final_bootstrap import interval_tables
 
     # Computed (and cached) on first use. Subjects are resampled (Cars 2: depth probes); tables for
     # saturation ranks (internal, LOSO), cross-dataset AUC differences, and per-ROI saturation ranks.
-    if show_ci.value == "On":
-        model_cis = interval_tables(
-            results_root, explained_variance.loso_curves, subspace_data.MODEL_LAYER_LIST,
-            {"podcast": repo_root / "data", "cars-2": repo_root / "data" / "brain-treebank",
+    model_cis = interval_tables(
+        results_root, explained_variance.loso_curves, subspace_data.MODEL_LAYER_LIST,
+        {"podcast": repo_root / "data", "cars-2": repo_root / "data" / "brain-treebank",
          "fmri": repo_root / "data" / "deep-fMRI-dataset"}, roi_names)
-    else:
-        model_cis = None
     return interval_tables, model_cis
 
 
 @app.cell(hide_code=True)
-def _(color_by_model):
+def _():
     from src.utils.plotting.final_axes import set_model_point_colors
 
-    # Every distribution plot reads this switch; the cells below redraw when it changes.
-    model_colors_on = set_model_point_colors(color_by_model.value == "By model")
+    # Points in every distribution plot are colored by model.
+    model_colors_on = set_model_point_colors(True)
     return (model_colors_on,)
 
 
@@ -199,14 +169,14 @@ def _(mo):
         models (smallest possible p = 1/2^n, e.g. 0.016 for six models). In the distribution plots, small
         dots are layers, squares are model means, and the black diamond is the mean of the model means.
 
-            **Confidence intervals** (optional toggle above): thin whiskers on the model-mean squares are 95%
-            bootstrap intervals over resampled subjects (Cars 2: depth probes), weighted by number of targets;
+            **Confidence intervals**: thin whiskers on the model-mean squares are 95%
+            bootstrap intervals over resampled subjects (Cars 2 (sEEG): depth probes), weighted by number of targets;
             each resample averages a model's layers in log$_2$ rank. LOSO intervals resample held-out subjects
             (only where there are at least five).
 
             **fMRI explained variance** is noise-normalized throughout: each voxel's $r^2$ is divided by its
             squared noise ceiling ($CC_{max}^2$, ceiling floored at 0.25; voxels without a ceiling are dropped), so
-            it is a fraction of the explainable variance. Podcast and Cars 2 have no noise ceiling and use raw $r^2$.
+            it is a fraction of the explainable variance. Podcast (ECoG) and Cars 2 (sEEG) have no noise ceiling and use raw $r^2$.
             The appendix at the end repeats the fMRI figures with raw $r^2$.
     """)
     return
@@ -633,7 +603,7 @@ def _(mo):
     ## PCA dimensionality of the word embeddings
 
     The same curves for every model layer's z-scored embeddings over each dataset's
-    GloVe-covered words (Podcast and Cars 2: the cached epoch words; fMRI: the training-story words).
+    GloVe-covered words (Podcast (ECoG) and Cars 2 (sEEG): the cached epoch words; Moth (fMRI): the training-story words).
     """)
     return
 
@@ -798,7 +768,7 @@ def _(mo):
 
     The main figures report fMRI explained variance as a fraction of the explainable variance
     ($r^2 / CC_{max}^2$ per voxel). Here the main analyses are repeated with raw $r^2$ for fMRI, to show
-    that the conclusions do not depend on the normalization. Podcast and Cars 2 are identical to the
+    that the conclusions do not depend on the normalization. Podcast (ECoG) and Cars 2 (sEEG) are identical to the
     main figures, and random GPT-2 is left out as there.
     """)
     return
@@ -817,16 +787,12 @@ def _(
     repo_root,
     results_root,
     roi_names,
-    show_ci,
     subspace_data,
 ):
-    if show_ci.value == "On":
-        model_cis_raw = interval_tables(
-            results_root, explained_variance_raw.loso_curves, subspace_data.MODEL_LAYER_LIST,
-            {"podcast": repo_root / "data", "cars-2": repo_root / "data" / "brain-treebank",
+    model_cis_raw = interval_tables(
+        results_root, explained_variance_raw.loso_curves, subspace_data.MODEL_LAYER_LIST,
+        {"podcast": repo_root / "data", "cars-2": repo_root / "data" / "brain-treebank",
          "fmri": repo_root / "data" / "deep-fMRI-dataset"}, roi_names, fmri_noise_normalized=False)
-    else:
-        model_cis_raw = None
     return (model_cis_raw,)
 
 
@@ -910,12 +876,67 @@ def _(
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    # Saturation rank as a function of lag (iEEG)
+
+    For every model layer, each lag (-2 to 2 s) gets its own explained-variance rank curve over all
+    electrodes at that lag (folds Fisher-averaged, negatives clipped, mean $r^2$); its saturation rank
+    is the first rank reaching 99% of that curve's own maximum. Faint lines are individual RRR model
+    layers (colored by model). The black line is the mean over RRR model layers and the red line the mean
+    over PCA model layers (PCA layers not shown), both averaged in log$_2$ rank. Shaded bands are 95%
+    bootstrap intervals of those means: clusters (Podcast (ECoG): subjects; Cars 2 (sEEG): depth probes) are resampled
+    with replacement, shared by all layers, and the per-lag curves and saturation ranks recomputed in each
+    resample (pointwise, not corrected across lags).
+
+    Stars along the top mark lags where RRR saturates at a significantly lower rank than PCA: at each lag
+    a model's layers are averaged in log$_2$ rank, then RRR is compared with PCA by a one-sided exact
+    paired sign-flip test across models (as in the distribution plots), with Benjamini-Hochberg FDR control
+    at 0.05 across the lags of each dataset.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(MAIN_EXCLUDED, results_root):
+    from src.utils.plotting.final_lag_saturation import (
+        lag_saturation_figure, lag_saturation_significance, load_lag_saturation,
+        load_lag_saturation_intervals,
+    )
+
+    # Cached in results/.final_lag_saturation_cache*.pkl (first computation takes a few minutes).
+    lag_saturation = load_lag_saturation(results_root)
+    lag_saturation_intervals = load_lag_saturation_intervals(results_root, exclude_models=MAIN_EXCLUDED)
+    return (
+        lag_saturation,
+        lag_saturation_figure,
+        lag_saturation_intervals,
+        lag_saturation_significance,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    MAIN_EXCLUDED,
+    lag_saturation,
+    lag_saturation_figure,
+    lag_saturation_intervals,
+    lag_saturation_significance,
+    mo,
+    without_models,
+):
+    _lag_saturation = without_models(lag_saturation, MAIN_EXCLUDED)
+    _significance = lag_saturation_significance(_lag_saturation)
+    _counts = "\n".join(
+        f"- **{dataset}**: {int(flagged.sum())} of {len(flagged)} lags significant (RRR < PCA, BH FDR 0.05)"
+        for dataset, (_, _, _, flagged) in _significance.items())
+    mo.vstack([
+        lag_saturation_figure(_lag_saturation, lag_saturation_intervals, _significance),
+        mo.md(_counts),
+    ])
+    return
+
+
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1:
-        from src.utils.plotting.final_export import main
-
-        main()
-    else:
-        app.run()
+    app.run()

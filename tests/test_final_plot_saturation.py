@@ -59,12 +59,12 @@ def test_significance_table_groups_models_by_relative_depth():
     }
     table = significance_latex(significant, ["gpt2", "gpt2-xl", "glove"])
     assert r"0\% & 25\% & 50\% & 75\% & 100\%" in table
-    assert "Podcast & gpt2 & 1 & -- & -- & -- & 2" in table
+    assert "Podcast (ECoG) & gpt2 & 1 & -- & -- & -- & 2" in table
     assert " & gpt2-xl & -- & 1 & -- & -- & --" in table
     assert " & gpt2-xl-batch & -- & -- & 1 & -- & --" in table
     assert r" & glove & \multicolumn{5}{c}{2 (layerless)}" in table
     assert r" & Union & \multicolumn{5}{c}{3}" in table
-    assert "Cars 2 & gpt2 & -- & 1 & -- & -- & --" in table
+    assert "Cars 2 (sEEG) & gpt2 & -- & 1 & -- & -- & --" in table
     assert table.count("Podcast") == table.count("Cars 2") == table.count("fMRI") == 1
 
 

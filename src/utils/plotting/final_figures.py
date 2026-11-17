@@ -521,7 +521,7 @@ def cross_gap_scatter(cross, saturation_mode="quantile"):
                 all_points.append(points)
                 ax.scatter(points[:, 0], points[:, 1], s=35, alpha=.72,
                            color=colors[index], edgecolors="white", linewidths=.4,
-                           label=f"{LABELS[source]} → {LABELS[target]} (n={len(points)})")
+                           label=f"{LABELS[source]} → {LABELS[target]}, n={len(points)}")
         if all_points:
             points = np.vstack(all_points)
             lo, hi = min(0, points.min()), max(0, points.max())

@@ -207,12 +207,27 @@ HDF5 container while keeping plots as separately browsable PNG files.
   model are not independent, so every significance test averages layers within each model and runs an exact
   paired sign-flip test across models (`model_sign_flip` in `plot_metrics.py`; the smallest possible p is
   1/2^n, e.g. 0.016 for six models, 0.0625 for four). In the distribution plots dots are layers, squares are
-  model means and the diamond is their mean; an optional notebook toggle adds 95% bootstrap intervals on the
+  model means and the diamond is their mean; the notebook always adds 95% bootstrap intervals (and colors points by model) on the
   model means (`final_bootstrap.py`): subjects are resampled (Cars 2: depth probes), weighted by target count,
   and each draw averages a model's layers in log2 saturation rank; LOSO resamples held-out subjects.
   The notebook's "Shuffled-embedding null control" section redraws the internal RRR aggregate from
   `results/run_rrr_shuffled/` via `load_shuffled_internal_data` (internal mode only, uncached) for
   comparison with the main internal figure.
+  The notebook's final "Saturation rank as a function of lag" section
+  (`src/utils/plotting/final_lag_saturation.py`, cached in `results/.final_lag_saturation_cache.pkl`)
+  computes an explained-variance saturation rank (99% of max) separately at each of the 128 iEEG lags
+  (-2 to 2 s) for every model layer and method (RRR, PCA), and plots rank vs. lag for Podcast and Cars 2:
+  translucent model-colored RRR lines per layer, a black RRR mean and a red PCA mean (both in log2 rank),
+  each with a 95% bootstrap band (resampling subjects, or depth probes for Cars 2, via `final_bootstrap`
+  helpers; the cache is `..._ci.pkl`). Stars at the top mark lags where RRR saturates significantly lower
+  than PCA: per-model mean log2 rank (layers averaged), one-sided exact paired sign-flip across models
+  (as in the distribution plots), Benjamini-Hochberg FDR 0.05 across lags within each dataset.
+  The export writes it as `lag_saturation` and prints the number of significant lags.
+  Figure titles name each dataset with its modality via `LABELS` in `final_data.py`:
+  Podcast (ECoG), Cars 2 (sEEG), Moth (fMRI). Editing `final_data.py` invalidates the results caches.
+  The export matches the notebook: it colors distribution-plot points by model, draws the 95% bootstrap
+  intervals (`bootstrap_intervals`, cached, from `final_bootstrap.interval_tables`; main and raw-fMRI sets,
+  none for the quantile appendix, shuffled control or sensitivity grids), and writes `lag_saturation`.
   Running without arguments retains interactive notebook execution.
   Shared artifact-independent rank calculations live in
   `src/utils/rrr/plot_metrics.py`; reusable axis and figure functions live in

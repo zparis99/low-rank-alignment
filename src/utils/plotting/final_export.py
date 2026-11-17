@@ -4,6 +4,10 @@
 the rank reaching 99% of the maximum mean r^2 per target. `--saturation-mode quantile`
 writes the target-quantile appendix versions into a `quantile/` subfolder. `--all` writes both
 of those plus the raw-fMRI-r^2 appendix (`raw_fmri/` subfolder) in one run.
+
+Like the notebook, every distribution plot colors its points by model and carries the 95%
+bootstrap intervals on saturation ranks (`final_bootstrap.interval_tables`), and the main export
+includes the saturation-rank-by-lag figure.
 """
 
 from __future__ import annotations
@@ -42,7 +46,40 @@ def available_pairs(quantiles, *, loso=False):
     )
 
 
-def _subspace_jobs(raw_fmri_only=False):
+def _data_roots(root):
+    return {"podcast": root / "data", "cars-2": root / "data" / "brain-treebank",
+            "fmri": root / "data" / "deep-fMRI-dataset"}
+
+
+def bootstrap_intervals(results_root, explained_variance, *, fmri_noise_normalized=True):
+    """The notebook's `interval_tables` (cached under `results/final_subspace_cache`)."""
+    from src.utils.atlas.core import bihemispheric_region_groups
+    from src.utils.plotting import final_subspace_data as data
+    from src.utils.plotting.final_bootstrap import interval_tables
+
+    results_root = Path(results_root)
+    return interval_tables(
+        results_root, explained_variance.loso_curves, data.MODEL_LAYER_LIST,
+        _data_roots(results_root.parent), list(bihemispheric_region_groups()),
+        fmri_noise_normalized=fmri_noise_normalized)
+
+
+def lag_saturation(results_root):
+    """The notebook's saturation-rank-by-lag figure; prints the number of significant lags."""
+    from src.utils.plotting import final_lag_saturation as lag
+    from src.utils.plotting.final_figures import without_models
+
+    results_root = Path(results_root)
+    curves = without_models(lag.load_lag_saturation(results_root), (RANDOM_MODEL,))
+    intervals = lag.load_lag_saturation_intervals(results_root, exclude_models=(RANDOM_MODEL,))
+    significance = lag.lag_saturation_significance(curves)
+    for dataset, (_, _, _, flagged) in significance.items():
+        print(f"{dataset}: {int(flagged.sum())} of {len(flagged)} lags significant "
+              "(RRR < PCA, BH FDR 0.05)", flush=True)
+    return lag.lag_saturation_figure(curves, intervals, significance)
+
+
+def _subspace_jobs(raw_fmri_only=False, intervals=None):
     """Appendix figures of dimensionality and subspace consistency (same data as the notebook).
 
     Datasets whose results or raw data are missing are drawn as empty panels. With
@@ -101,9 +138,10 @@ def _subspace_jobs(raw_fmri_only=False):
         if not separate:
             curves = without_models(curves, (RANDOM_MODEL,), index=2)
         options = {"separate_model": RANDOM_MODEL} if separate else {}
-        return (roi_saturation.roi_normalized_curves(curves, counts, names, **options)
-                if name == "normalized"
-                else roi_saturation.roi_saturation_distributions(curves, names, counts, **options))
+        if name == "normalized":
+            return roi_saturation.roi_normalized_curves(curves, counts, names, **options)
+        return roi_saturation.roi_saturation_distributions(
+            curves, names, counts, intervals=None if intervals is None else intervals["roi"], **options)
 
     if raw_fmri_only:
         return [
@@ -138,7 +176,7 @@ _CACHE = {}
 
 
 def export_figures(data, output_dir, formats, example_pair, loso_pair,
-                   saturation_mode="explained_variance", shuffled=None):
+                   saturation_mode="explained_variance", shuffled=None, intervals=None):
     """Save and close figures one at a time to keep export memory bounded.
 
     Explained-variance mode writes the main figures plus the figures that do not
@@ -148,10 +186,17 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
     raw-fMRI-r^2 appendix to `output_dir/raw_fmri`. `shuffled` is the
     `(ExplainedVarianceData, gaps)` pair from `load_shuffled_internal_data`; when given (or
     missing/empty) the shuffled-embedding internal aggregate is exported (or reported as a gap)
-    in explained-variance mode.
+    in explained-variance mode. `intervals` is the `bootstrap_intervals` result matching the data
+    (explained-variance data for the main figures, raw-fMRI data for `raw_fmri`); it adds the
+    saturation-rank whiskers the notebook always shows. Points are colored by model, as in the
+    notebook.
     """
     import matplotlib.pyplot as plt
     from src.utils.plotting import final_figures as figures
+    from src.utils.plotting.final_axes import set_model_point_colors
+
+    set_model_point_colors(True)
+    _cis = lambda mode: None if intervals is None else intervals[mode]
 
     (internal, loso, cross, quantiles, loso_quantiles, full_rows,
      significant, decoding, gaps, explained_variance) = data
@@ -167,23 +212,23 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
         jobs = [
             ("rrr_internal_aggregate", lambda: figures.rrr_aggregate(
                 ev.internal, ev.loso, ev.curves, ev.loso_curves, ev.full_rows, example_pair,
-                mode="internal", saturation_mode=saturation_mode)),
+                mode="internal", saturation_mode=saturation_mode, intervals=_cis("internal"))),
             ("rrr_internal_aggregate_random_gpt2", lambda: figures.rrr_aggregate(
                 full.internal, full.loso, full.curves, full.loso_curves, full.full_rows,
                 example_pair, mode="internal", saturation_mode=saturation_mode,
-                separate_model=RANDOM_MODEL, distributions_only=True)),
+                separate_model=RANDOM_MODEL, distributions_only=True, intervals=_cis("internal"))),
             ("rrr_loso_aggregate", lambda: figures.rrr_aggregate(
                 ev.internal, ev.loso, ev.curves, ev.loso_curves, ev.full_rows, loso_pair,
-                mode="loso", saturation_mode=saturation_mode)),
+                mode="loso", saturation_mode=saturation_mode, intervals=_cis("loso"))),
             ("rrr_loso_aggregate_random_gpt2", lambda: figures.rrr_aggregate(
                 full.internal, full.loso, full.curves, full.loso_curves, full.full_rows,
                 loso_pair, mode="loso", saturation_mode=saturation_mode,
-                separate_model=RANDOM_MODEL, distributions_only=True)),
+                separate_model=RANDOM_MODEL, distributions_only=True, intervals=_cis("loso"))),
             ("rrr_cross_dataset_aggregate", lambda: figures.cross_aggregate(
-                ev.cross, saturation_mode)),
+                ev.cross, saturation_mode, intervals=_cis("auc"))),
             ("rrr_cross_dataset_aggregate_random_gpt2", lambda: figures.cross_aggregate(
                 full.cross, saturation_mode, separate_model=RANDOM_MODEL,
-                distributions_only=True)),
+                distributions_only=True, intervals=_cis("auc"))),
             ("rrr_cross_dataset_auc_gap", lambda: figures.cross_gap_scatter(
                 ev.cross, saturation_mode)),
             ("saturation_sensitivity_fraction", lambda: figures.sensitivity_grid(
@@ -193,6 +238,7 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
             ("language_decoding_aggregate", lambda: figures.decoding_aggregate(decoding)),
             ("encoding_performance", lambda: figures.encoding_grid(full_rows, order)),
             ("significant_targets", lambda: figures.significance_grid(significant, order)),
+            ("lag_saturation", lambda: lag_saturation(Path(__file__).resolve().parents[3] / "results")),
         ]
         if shuffled is not None:
             shuffled_ev, shuffled_gaps = shuffled
@@ -232,19 +278,19 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
             ("rrr_internal_aggregate", lambda: figures.rrr_aggregate(
                 raw.internal, raw.loso, raw.curves, raw.loso_curves, raw.full_rows, example_pair,
                 mode="internal", saturation_mode="explained_variance",
-                fmri_noise_normalized=False)),
+                intervals=_cis("internal"), fmri_noise_normalized=False)),
             ("rrr_loso_aggregate", lambda: figures.rrr_aggregate(
                 raw.internal, raw.loso, raw.curves, raw.loso_curves, raw.full_rows, loso_pair,
                 mode="loso", saturation_mode="explained_variance",
-                fmri_noise_normalized=False)),
+                intervals=_cis("loso"), fmri_noise_normalized=False)),
             ("rrr_cross_dataset_aggregate", lambda: figures.cross_aggregate(
-                raw.cross, "explained_variance")),
-            *_subspace_jobs(raw_fmri_only=True),
+                raw.cross, "explained_variance", intervals=_cis("auc"))),
+            *_subspace_jobs(raw_fmri_only=True, intervals=intervals),
         ]
     else:
         raise ValueError(f"unknown saturation mode {saturation_mode!r}")
     if saturation_mode == "explained_variance":
-        jobs.extend(_subspace_jobs())
+        jobs.extend(_subspace_jobs(intervals=intervals))
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for index, (name, build) in enumerate(jobs, start=1):
@@ -323,14 +369,20 @@ def main(argv=None):
     print(f"Examples: internal={example_pair}, LOSO={loso_pair}", flush=True)
     print(f"Missing or incomplete results: {len(data[8])}; exporting available results.", flush=True)
     if not args.all:
-        shuffled = (load_shuffled_internal_data(results_root)
-                    if args.saturation_mode == "explained_variance" else None)
+        explained = args.saturation_mode == "explained_variance"
+        shuffled = load_shuffled_internal_data(results_root) if explained else None
+        print("Loading bootstrap intervals (cached after the first run)...", flush=True)
+        intervals = bootstrap_intervals(results_root, data[9]) if explained else None
         return export_figures(data, args.output_dir, args.format, example_pair, loso_pair,
-                              args.saturation_mode, shuffled)
+                              args.saturation_mode, shuffled, intervals)
+    print("Loading bootstrap intervals (cached after the first run)...", flush=True)
     paths = export_figures(data, args.output_dir, args.format, example_pair, loso_pair,
-                           "explained_variance", load_shuffled_internal_data(results_root))
+                           "explained_variance", load_shuffled_internal_data(results_root),
+                           bootstrap_intervals(results_root, data[9]))
     paths += export_figures(data, args.output_dir, args.format, example_pair, loso_pair, "quantile")
     print("Loading raw-fMRI-r^2 result summaries...", flush=True)
     raw_data = load_final_data(results_root, fmri_noise_normalized=False)
-    paths += export_figures(raw_data, args.output_dir, args.format, example_pair, loso_pair, "raw_fmri")
+    raw_intervals = bootstrap_intervals(results_root, raw_data[9], fmri_noise_normalized=False)
+    paths += export_figures(raw_data, args.output_dir, args.format, example_pair, loso_pair, "raw_fmri",
+                            intervals=raw_intervals)
     return paths
