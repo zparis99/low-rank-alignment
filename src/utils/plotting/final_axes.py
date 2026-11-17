@@ -18,6 +18,101 @@ COLORS = {
 }
 
 
+# One fixed color per model family, shared by every figure that colors points by model.
+MODEL_COLORS = {
+    "gpt2": "#0072B2", "gpt2-xl-batch": "#E69F00", "gpt-j-6b": "#009E73",
+    "roberta-large": "#CC79A7", "llama3-8b": "#D55E00",
+    "random-gpt2": "#6A3D9A", "glove-300": "#8C6D31",
+}
+MODEL_NAMES = {
+    "gpt2": "GPT-2", "gpt2-xl-batch": "GPT-2 XL", "gpt-j-6b": "GPT-J 6B",
+    "roberta-large": "RoBERTa Large", "llama3-8b": "Llama 3 8B",
+    "random-gpt2": "Random GPT-2", "glove-300": "GloVe 300D",
+}
+_COLOR_POINTS_BY_MODEL = False
+
+
+def set_model_point_colors(enabled):
+    """Color the points of every distribution plot by model (True) or by method (False)."""
+    global _COLOR_POINTS_BY_MODEL
+    _COLOR_POINTS_BY_MODEL = bool(enabled)
+    return _COLOR_POINTS_BY_MODEL
+
+
+def with_model_legend(build):
+    """Decorate a figure function: when points are colored by model, add the model legend."""
+    import functools
+
+    @functools.wraps(build)
+    def wrapper(*args, **kwargs):
+        figure = build(*args, **kwargs)
+        models = getattr(figure, "_point_models", set())
+        if _COLOR_POINTS_BY_MODEL and models:
+            order = [model for model in MODEL_COLORS if model in models]
+            handles = [plt.Line2D([], [], marker="o", linestyle="", markersize=9,
+                                  markerfacecolor=MODEL_COLORS[m], markeredgecolor="white",
+                                  label=MODEL_NAMES[m]) for m in order]
+            figure.legend(handles=handles, loc="upper center", bbox_to_anchor=(.5, 0.0),
+                          ncol=len(handles), frameon=False, fontsize=12,
+                          title="Point color: model")
+        return figure
+    return wrapper
+
+
+SEPARATE_SUFFIX = " (random)"
+
+
+def separate_label(label):
+    """Key for the separately drawn model's version of `label` (e.g. 'RRR' -> 'RRR (random)')."""
+    return f"{label}{SEPARATE_SUFFIX}"
+
+
+def separate_color(color):
+    """A darker shade of `color`, for the separately drawn model's version of a method."""
+    from matplotlib.colors import to_rgb
+
+    return tuple(.62 * channel for channel in to_rgb(color))
+
+
+def separate_group_captions(ax, n_main, n_total, *, offset, names=("Other models", "Random GPT-2"),
+                            captions=True):
+    """Mark the separately drawn model's violins: a divider plus a caption under each group.
+
+    `n_main` violins come first and `n_total - n_main` follow; `offset` is the caption's
+    distance (points) below the axis, enough to clear the tick labels.
+    """
+    if not 0 < n_main < n_total:
+        return
+    ax.axvline(n_main + .5, color="#9ca3af", linestyle=":", linewidth=1.2, zorder=0)
+    for first, last, name in ((1, n_main, names[0]), (n_main + 1, n_total, names[1])):
+        if not captions:
+            break
+        ax.annotate(name, ((first + last) / 2, 0), xycoords=ax.get_xaxis_transform(),
+                    xytext=(0, -offset), textcoords="offset points", ha="center",
+                    va="top", fontsize=12, color="#374151", fontweight="bold",
+                    annotation_clip=False)
+
+
+def add_bracket_headroom(ax, n_brackets, *, extra=.0):
+    """Extend the y range so test brackets and p-values sit above the data.
+
+    Brackets are drawn at fixed axes fractions (`pairwise_test_brackets`), so the data must end
+    below the lowest one. Call once per set of shared y axes, after everything is drawn.
+    """
+    ax.relim()
+    ax.autoscale_view()
+    low, high = ax.get_ylim()
+    ceiling = .90 - .12 * (n_brackets - 1) - .06 - extra
+    ax.set_ylim(low, low + (high - low) / ceiling)
+
+
+def _method_style(method):
+    """(color, linestyle, legend label) of a curve key."""
+    linestyle = "--" if "transfer" in method.lower() else "-"
+    return (COLORS.get(method, "#64748b"), linestyle,
+            method.upper() if method in {"rrr", "pca"} else method)
+
+
 def paper_style():
     """Use type sizes that remain readable when figures are placed in a paper."""
     return plt.rc_context({
@@ -40,7 +135,7 @@ def format_p_value(value):
     return "p < 0.001" if value < .001 else f"p = {value:.3f}"
 
 
-def rank_curve_axis(ax, curves, *, saturation=None, baseline=None):
+def rank_curve_axis(ax, curves, *, saturation=None, baseline=None, ylabel="Correlation"):
     """Draw a selected model layer's mean rank curves on an existing axis."""
     for method, (ranks, values) in curves.items():
         color = COLORS.get(method, "#64748b")
@@ -55,7 +150,7 @@ def rank_curve_axis(ax, curves, *, saturation=None, baseline=None):
                    label="Full model baseline")
     ax.set_xscale("log", base=2)
     ax.set_xlabel("Rank $k$")
-    ax.set_ylabel("Correlation")
+    ax.set_ylabel(ylabel)
     finish_axis(ax)
 
 
@@ -65,17 +160,15 @@ def normalized_curve_axis(ax, curves, *, grid=None):
         grid = np.r_[0.0, np.geomspace(1e-4, 1.0, 199)]
     for method, members in curves.items():
         aligned = []
-        color = COLORS.get(method, "#64748b")
+        color, linestyle, label = _method_style(method)
         for ranks, values in members:
             x, y = monotonic_normalized_curve(ranks, values)
             if len(x):
-                ax.plot(x, y, color=color, linewidth=.7, alpha=.1,
-                        linestyle="--" if "transfer" in method.lower() else "-")
+                ax.plot(x, y, color=color, linewidth=.7, alpha=.1, linestyle=linestyle)
                 aligned.append(np.interp(grid, x, y))
         if aligned:
             ax.plot(grid, np.mean(aligned, axis=0), color=color, linewidth=2,
-                    linestyle="--" if "transfer" in method.lower() else "-",
-                    label=method.upper() if method in {"rrr", "pca"} else method)
+                    linestyle=linestyle, label=label)
     ax.set_xscale("symlog", linthresh=.01)
     ax.set_xticks([0, .001, .01, .1, 1], ["0", "0.1%", "1%", "10%", "100%"])
     ax.set(xlim=(0, 1), ylim=(-.02, 1.02), xlabel="Relative rank",
@@ -83,12 +176,37 @@ def normalized_curve_axis(ax, curves, *, grid=None):
     finish_axis(ax)
 
 
+def _model_offsets(models_by_label):
+    """Horizontal offset of every model's column inside a violin (same in every violin)."""
+    present = {str(m) for models in models_by_label.values() if models is not None for m in models}
+    order = [m for m in MODEL_COLORS if m in present] + sorted(present - set(MODEL_COLORS))
+    spread = min(.34, .06 * (len(order) - 1))
+    positions = np.linspace(-spread, spread, len(order)) if len(order) > 1 else [0.0]
+    return dict(zip(order, positions))
+
+
 def distribution_axis(ax, groups, *, log2_rank=False, show_points=True, paired=None,
-                      show_mean_value=False):
-    """Draw the established violin, box, points, and black mean diamond."""
+                      show_mean_value=False, point_models=None, label_colors=None,
+                      model_intervals=None):
+    """Draw violins with per-model columns of layer dots and a black mean diamond.
+
+    `point_models` optionally maps each label to the model of every value (same order as
+    `groups[label]`). Each model then gets its own column (fixed horizontal offset): its layers
+    are the small dots (colored by model when that switch is on, see `set_model_point_colors`),
+    its mean over layers is the larger square, and `model_intervals` (label -> `{model: (low,
+    high)}` in the plotted, log2, units) are the whiskers through the squares. The diamond is the
+    equal-weight mean of the model means.
+    """
     labels = list(groups)
     values = [np.asarray(groups[label], dtype=float) for label in labels]
-    values = [item[np.isfinite(item)] for item in values]
+    finite = [np.isfinite(item) for item in values]
+    full_models = {label: (None if point_models is None or label not in point_models else
+                           np.asarray(point_models[label], dtype=object))
+                   for label in labels}
+    models = {label: (None if full_models[label] is None else full_models[label][mask])
+              for label, mask in zip(labels, finite)}
+    offset = _model_offsets(models)
+    values = [item[mask] for item, mask in zip(values, finite)]
     valid = [(label, item) for label, item in zip(labels, values) if len(item)]
     if not valid:
         ax.text(.5, .5, "No finite results", ha="center", va="center",
@@ -99,35 +217,67 @@ def distribution_axis(ax, groups, *, log2_rank=False, show_points=True, paired=N
     transformed = [np.log2(item) if log2_rank else item for item in values]
     positions = np.arange(1, len(labels) + 1)
     if paired:
+        seen = {label: 0 for label in labels}  # index of the next row of each label's group
         for row in paired:
-            available = [(position, np.log2(row[label]) if log2_rank else row[label])
+            model = None
+            for label in labels:
+                if label in row:
+                    if full_models[label] is not None and seen[label] < len(full_models[label]):
+                        model = str(full_models[label][seen[label]])
+                    seen[label] += 1
+            shift = offset.get(model, 0.0)
+            available = [(position + shift, np.log2(row[label]) if log2_rank else row[label])
                          for position, label in zip(positions, labels)
                          if label in row and np.isfinite(row[label]) and row[label] > 0]
             for (x0, y0), (x1, y1) in zip(available, available[1:]):
                 ax.plot([x0, x1], [y0, y1], color="#9ca3af",
                         linewidth=.65, alpha=.5, zorder=1)
-    violins = ax.violinplot(transformed, positions=positions, widths=.72,
+    violins = ax.violinplot(transformed, positions=positions, widths=.86,
                             showextrema=False)
-    colors = [COLORS.get(label, "#6ab2e2") for label in labels]
+    label_colors = label_colors or {}
+    colors = [label_colors.get(label, COLORS.get(label, "#6ab2e2")) for label in labels]
     for body, color in zip(violins["bodies"], colors):
         body.set(facecolor=color, edgecolor=color, alpha=.22, linewidth=1)
-    boxes = ax.boxplot(transformed, positions=positions, widths=.20,
-                       patch_artist=True, showfliers=False,
-                       medianprops={"color": "black", "linewidth": 1.2})
-    for box, color in zip(boxes["boxes"], colors):
-        box.set_facecolor(color)
-        box.set_alpha(.18)
     for position, item, raw, color in zip(positions, transformed, values, colors):
-        if show_points:
-            offsets = np.linspace(-.14, .14, len(item)) if len(item) > 1 else [0]
-            ax.scatter(position + np.asarray(offsets), item, s=19, color=color,
-                       edgecolors="white", linewidths=.35, zorder=3)
-        mean = float(np.mean(raw))
-        mean_height = np.log2(mean) if log2_rank else mean
+        label = labels[position - 1]
+        label_models = models[label]
+        if label_models is None:
+            if show_points:
+                jitter = np.linspace(-.14, .14, len(item)) if len(item) > 1 else [0]
+                ax.scatter(position + np.asarray(jitter), item, s=19, color=color,
+                           edgecolors="white", linewidths=.35, zorder=3)
+            mean = float(np.mean(raw))
+            mean_height = np.log2(mean) if log2_rank else mean
+        else:
+            xs = np.array([position + offset[str(m)] for m in label_models])
+            if _COLOR_POINTS_BY_MODEL:
+                ax.figure.__dict__.setdefault("_point_models", set()).update(label_models)
+            model_color = (lambda m: MODEL_COLORS.get(m, "#64748b") if _COLOR_POINTS_BY_MODEL
+                           else color)
+            if show_points:
+                ax.scatter(xs, item, s=19, color=[model_color(str(m)) for m in label_models],
+                           edgecolors="white", linewidths=.35, zorder=3)
+            # Layers of one model are not independent: average within each model first. The
+            # mean marker is the equal-weight mean of these model means (the tests' statistic).
+            model_height = {m: float(np.mean([v for v, name in zip(item, label_models)
+                                              if str(name) == m]))
+                            for m in sorted({str(m) for m in label_models})}
+            intervals = (model_intervals or {}).get(label, {})
+            for m, height in model_height.items():
+                x = position + offset[m]
+                if m in intervals and np.isfinite(intervals[m]).all():
+                    low, high = intervals[m]
+                    ax.errorbar(x, height, yerr=[[max(height - low, 0)], [max(high - height, 0)]],
+                                color="black", linewidth=1.2, capsize=2.5, capthick=1.2,
+                                zorder=3.6)
+                ax.scatter(x, height, marker="s", s=48, linewidths=.9, color=model_color(m),
+                           edgecolors="black", zorder=3.7)
+            mean_height = float(np.mean(list(model_height.values())))
+            mean = 2 ** mean_height if log2_rank else mean_height
         ax.scatter(position, mean_height,
                    marker="D", s=34, color="black", zorder=4)
         if show_mean_value:
-            ax.annotate(f"mean = {mean:.1f}", (position, mean_height),
+            ax.annotate(f"$\\mu$ = {mean:.1f}", (position, mean_height),
                         xytext=(0, 8), textcoords="offset points",
                         ha="center", va="bottom", fontsize=10, zorder=5,
                         bbox={"facecolor": "white", "edgecolor": "none",

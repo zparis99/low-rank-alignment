@@ -14,14 +14,67 @@ from src.utils.plotting.final_axes import (
     distribution_axis, finish_axis,
     format_p_value,
     normalized_curve_axis, pairwise_test_brackets, paper_style, quantile_axis, rank_curve_axis,
-    target_bar_axis,
+    add_bracket_headroom, separate_color, separate_group_captions, separate_label,
+    target_bar_axis, with_model_legend,
 )
 from src.utils.plotting.final_data import DATASETS, LABELS, QUANTILES
 from scripts.utilities.check_final_significance import MODEL_LAYERS
 from src.utils.rrr.plot_metrics import (
-    PEAK_FLOOR, average_normalized_quantiles, fisher_mean,
-    normalized_log_rank_auc, paired_sign_flip, quantile_saturation_rank,
+    PEAK_FLOOR, average_normalized_quantiles, explained_variance_saturation_rank,
+    fisher_mean, model_sign_flip, normalized_log_rank_auc, paired_sign_flip,
+    quantile_saturation_rank,
 )
+
+# How each saturation mode reads its curve tables and measures saturation.
+# "quantile": correlation curves, saturation from target-quantile curves.
+# "explained_variance": mean r^2 per target curves; saturation is the rank reaching a
+# fraction of the curve's own maximum.
+MODES = {
+    "quantile": {"column": "correlation", "aggregate": fisher_mean,
+                 "ylabel": "Correlation"},
+    "explained_variance": {"column": "explained_variance", "aggregate": "mean",
+                           "ylabel": "Mean $r^2$\nper target"},
+}
+
+
+def _mode(saturation_mode):
+    try:
+        return MODES[saturation_mode]
+    except KeyError:
+        raise ValueError(f"saturation_mode must be one of {tuple(MODES)}, "
+                         f"got {saturation_mode!r}") from None
+
+
+def _saturation_rank(saturation_mode, ranks, matrix, fraction, min_peak=PEAK_FLOOR):
+    """Saturation rank of one stored curve table entry under the chosen mode."""
+    if saturation_mode == "explained_variance":
+        return explained_variance_saturation_rank(ranks, np.asarray(matrix)[:, 0], fraction)
+    return quantile_saturation_rank(ranks, matrix, fraction, min_peak)
+
+
+def without_models(data, models, *, index=1):
+    """`data` with every result of the given models removed.
+
+    `data` may be a DataFrame with a `model` column, a dict keyed by tuples holding the model
+    at position `index` (default 1: `(dataset, model, ...)`), a list of such tuples, or a
+    NamedTuple of those (for example `ExplainedVarianceData`).
+    """
+    models = set(models)
+    if hasattr(data, "_fields"):
+        return data._replace(**{name: without_models(getattr(data, name), models, index=index)
+                                for name in data._fields})
+    if isinstance(data, pd.DataFrame):
+        return data[~data["model"].isin(models)]
+    if isinstance(data, dict):
+        return {key: value for key, value in data.items() if key[index] not in models}
+    return [row for row in data if row[index] not in models]
+
+
+def _split_model(ranks, model):
+    """Split `{method: [((model, layer), rank), ...]}` into (others, the given model's)."""
+    others = {m: [row for row in rows if row[0][0] != model] for m, rows in ranks.items()}
+    chosen = {m: [row for row in rows if row[0][0] == model] for m, rows in ranks.items()}
+    return others, chosen
 
 
 def _layer(value):
@@ -33,74 +86,125 @@ def _pair_rows(frame, model, layer):
     return selected[selected["layer"].isna() if layer is None else selected["layer"].eq(layer)]
 
 
-def _curves(frame):
+def _curves(frame, saturation_mode="quantile"):
+    settings = _mode(saturation_mode)
     result = {}
     for method, group in frame.groupby("method"):
-        grouped = group.groupby("rank")["correlation"].agg(fisher_mean).sort_index()
+        grouped = group.groupby("rank")[settings["column"]].agg(settings["aggregate"]).sort_index()
         result[method] = (grouped.index.to_numpy(), grouped.to_numpy())
     return result
 
 
-def _members(frame):
+def _members(frame, saturation_mode="quantile"):
+    settings = _mode(saturation_mode)
     members = defaultdict(list)
     for (_, _, method), group in frame.groupby(["model", "layer", "method"], dropna=False):
         if "subject" in group:
-            group = group.groupby(["method", "rank"], as_index=False)["correlation"].agg(fisher_mean)
-        members[method].append(_curves(group)[method])
+            group = group.groupby(["method", "rank"], as_index=False)[settings["column"]].agg(
+                settings["aggregate"])
+        members[method].append(_curves(group, saturation_mode)[method])
     return members
 
 
-def _saturation_values(quantiles, dataset, methods, fraction, *, min_peak=PEAK_FLOOR):
+def _saturation_values(quantiles, dataset, methods, fraction, *, min_peak=PEAK_FLOOR,
+                       saturation_mode="quantile"):
     values = defaultdict(list)
     for key, (ranks, matrix) in quantiles.items():
         if key[0] != dataset or key[-1] not in methods:
             continue
-        rank = quantile_saturation_rank(ranks, matrix, fraction, min_peak)
+        rank = _saturation_rank(saturation_mode, ranks, matrix, fraction, min_peak)
         if np.isfinite(rank):
             values[key[-1]].append((key[1:3], rank))
     return values
 
 
 def _saturation_comparison_axis(ax, ranks, methods, labels, tests, *,
-                                show_mean_value=False):
-    """Draw paired model-layer ranks with the aggregate comparison style."""
-    rank_by_pair = {method: dict(ranks.get(method, [])) for method in methods}
-    common = set.intersection(*(set(values) for values in rank_by_pair.values()))
-    paired = [
-        {label: rank_by_pair[method][pair]
-         for method, label in zip(methods, labels)}
-        for pair in sorted(common, key=str)
-    ]
-    distribution_axis(ax, {
-        label: [row[label] for row in paired] for label in labels
-    }, log2_rank=True, paired=paired, show_mean_value=show_mean_value)
+                                show_mean_value=False, separate_model=None,
+                                tick_labels=None, intervals=None):
+    """Draw paired model-layer ranks with the aggregate comparison style.
+
+    With `separate_model`, that model's layers are drawn as their own set of violins (labelled
+    '... (random)') right of the others, with their own paired tests; every other model forms
+    the main set. `tick_labels` optionally maps a label to the text shown on the x axis.
+    `intervals` optionally maps a label to `{model: (low, high)}` bootstrap intervals (log2 rank).
+    """
+    separate_ranks = None
+    if separate_model is not None:
+        ranks, separate_ranks = _split_model(ranks, separate_model)
+
+    def paired_rows(source, row_labels):
+        by_pair = {method: dict(source.get(method, [])) for method in methods}
+        common = set.intersection(*(set(values) for values in by_pair.values()))
+        pairs = sorted(common, key=str)
+        rows = [{label: by_pair[method][pair] for method, label in zip(methods, row_labels)}
+                for pair in pairs]
+        return pairs, rows
+
+    pairs, paired = paired_rows(ranks, labels)
+    groups = {label: [row[label] for row in paired] for label in labels}
+    models = {label: [pair[0] for pair in pairs] for label in labels}
+    separate_labels = [separate_label(label) for label in labels]
+    all_rows, colors = list(paired), {}
+    if separate_ranks is not None:
+        separate_pairs, separate_paired = paired_rows(separate_ranks, separate_labels)
+        for label in separate_labels:
+            groups[label] = [row[label] for row in separate_paired]
+            models[label] = [pair[0] for pair in separate_pairs]
+        all_rows += separate_paired
+        colors = {separate_label(label): separate_color(COLORS.get(label, "#6ab2e2"))
+                  for label in labels}
+    model_intervals = None
+    if intervals:
+        model_intervals = {label: intervals.get(label.removesuffix(separate_label("")), {})
+                           for label in groups}
+    distribution_axis(ax, groups, log2_rank=True, paired=all_rows,
+                      show_mean_value=show_mean_value, point_models=models,
+                      label_colors=colors, model_intervals=model_intervals)
+    shown = [text.get_text() for text in ax.get_xticklabels()]
+    if separate_ranks is not None:
+        # Both groups share the same tick names; captions say which group is which.
+        base = [text.removesuffix(separate_label("")) for text in shown]
+        ax.set_xticklabels([(tick_labels or {}).get(text, text) for text in base])
+        n_main = sum(not text.endswith(separate_label("")) for text in shown)
+        separate_group_captions(ax, n_main, len(shown), offset=50 if tick_labels else 38)
+    elif tick_labels:
+        ax.set_xticklabels([tick_labels.get(text, text) for text in shown])
     if not paired:
         ax.set_xticks(range(1, len(labels) + 1), labels)
         ax.set_xlim(.45, len(labels) + .55)
         return
-    p_values = np.asarray([
-        paired_sign_flip(
-            [np.log2(row[first]) for row in paired],
-            [np.log2(row[second]) for row in paired],
-        )
-        for first, second in tests
-    ])
-    order = np.argsort(p_values)
-    adjusted = np.empty(len(p_values))
-    adjusted[order] = np.maximum.accumulate(np.minimum(
-        1.0, (len(p_values) - np.arange(len(p_values))) * p_values[order]
-    ))
-    pairwise_test_brackets(ax, labels, [
-        (first, second, p) for (first, second), p in zip(tests, adjusted)
-    ])
+
+    def brackets(rows, row_pairs, row_tests):
+        # One unit per model: each model's layers are averaged before the sign-flip test.
+        models = [pair[0] for pair in row_pairs]
+        p_values = np.asarray([
+            model_sign_flip([np.log2(row[first]) for row in rows],
+                            [np.log2(row[second]) for row in rows], models)
+            for first, second in row_tests
+        ])
+        if not np.isfinite(p_values).all():
+            return  # fewer than two models: no test
+        order = np.argsort(p_values)
+        adjusted = np.empty(len(p_values))
+        adjusted[order] = np.maximum.accumulate(np.minimum(
+            1.0, (len(p_values) - np.arange(len(p_values))) * p_values[order]
+        ))
+        pairwise_test_brackets(ax, list(groups), [
+            (first, second, p) for (first, second), p in zip(row_tests, adjusted)
+        ])
+
+    brackets(paired, pairs, tests)
+    if separate_ranks is not None and separate_paired:
+        brackets(separate_paired, separate_pairs,
+                 [(separate_label(first), separate_label(second)) for first, second in tests])
 
 
-def _loso_saturation_values(quantiles, dataset, fraction):
+def _loso_saturation_values(quantiles, dataset, fraction, saturation_mode="quantile"):
     by_pair = defaultdict(list)
     for key, (ranks, matrix) in quantiles.items():
         if key[0] != dataset:
             continue
-        rank = quantile_saturation_rank(ranks, matrix, fraction)
+        rank = _saturation_rank(saturation_mode, ranks, matrix, fraction)
         if np.isfinite(rank):
             by_pair[(key[1], key[2], key[4])].append(rank)
     values = defaultdict(list)
@@ -109,66 +213,96 @@ def _loso_saturation_values(quantiles, dataset, fraction):
     return values
 
 
+@with_model_legend
 def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
-                  selected_pair, *, mode="internal", fraction=.99):
-    """Two stacked curve columns beside three full-height rank distributions."""
+                  selected_pair, *, mode="internal", fraction=.99,
+                  saturation_mode="quantile", separate_model=None, distributions_only=False,
+                  intervals=None, fmri_noise_normalized=True):
+    """Two stacked curve columns beside three full-height rank distributions.
+
+    With `saturation_mode="explained_variance"`, pass the explained-variance tables:
+    `internal`/`loso` frames, the `curves`/`loso_curves` dictionaries in place of the
+    quantile dictionaries, and the explained-variance `full_rows`.
+
+    `separate_model` draws that model's layers as their own set of saturation violins next to
+    the others. Without it every model in the inputs is pooled (drop models beforehand with
+    `without_models`). `distributions_only` draws just the saturation distributions (panel C).
+    `intervals` maps `(dataset, model, method)` to a bootstrap interval in log2 saturation rank;
+    it is drawn as a whisker through each model-mean square. `fmri_noise_normalized` only
+    labels the fMRI sample-curve panel (pass False for the raw-r^2 appendix data).
+    """
+    settings = _mode(saturation_mode)
     with paper_style():
-        figure = plt.figure(figsize=(19, 7.4))
-        grid = figure.add_gridspec(
-            3, 3, width_ratios=[1.25, 1.25, 3],
-            hspace=.52, wspace=.35,
-        )
-        saturation_grid = grid[:, 2].subgridspec(1, 3, wspace=.10)
+        if distributions_only:
+            figure, distribution_axes = plt.subplots(
+                1, len(DATASETS), sharey=True,
+                figsize=(19 if separate_model is not None and mode == 'loso' else 14, 6.6))
+        else:
+            figure = plt.figure(figsize=(19, 7.4))
+            grid = figure.add_gridspec(
+                3, 3, width_ratios=[1.25, 1.25, 3],
+                hspace=.52, wspace=.35,
+            )
+            saturation_grid = grid[:, 2].subgridspec(1, 3, wspace=.10)
         source = internal if mode == "internal" else loso
         methods = ["rrr", "pca"] if mode == "internal" else [
             "RRR baseline", "RRR transfer", "PCA baseline"]
-        baseline_map = {(d, m, l): float(fisher_mean(v)) for d, m, l, v in full_rows}
+        average = fisher_mean if saturation_mode == "quantile" else np.nanmean
+        baseline_map = {(d, m, l): float(average(v)) for d, m, l, v in full_rows}
         first_saturation_ax = None
         for row, dataset in enumerate(DATASETS):
             frame = source[source["dataset"] == dataset]
             sample = _pair_rows(frame, *selected_pair)
-            sample_curves = _curves(sample)
+            sample_curves = _curves(sample, saturation_mode)
             if mode == "internal":
-                ranks = _saturation_values(quantiles, dataset, methods, fraction)
+                ranks = _saturation_values(quantiles, dataset, methods, fraction,
+                                           saturation_mode=saturation_mode)
                 markers = {
-                    method: quantile_saturation_rank(*quantiles[(dataset, *selected_pair, method)], fraction)
+                    method: _saturation_rank(
+                        saturation_mode, *quantiles[(dataset, *selected_pair, method)], fraction)
                     for method in methods if (dataset, *selected_pair, method) in quantiles
                 }
             else:
-                ranks = _loso_saturation_values(loso_quantiles, dataset, fraction)
+                ranks = _loso_saturation_values(loso_quantiles, dataset, fraction,
+                                                saturation_mode)
                 markers = {}
                 for method in methods:
-                    subject_ranks = [quantile_saturation_rank(*value, fraction)
+                    subject_ranks = [_saturation_rank(saturation_mode, *value, fraction)
                                      for key, value in loso_quantiles.items()
                                      if key[:3] == (dataset, *selected_pair) and key[-1] == method]
                     finite = [value for value in subject_ranks if np.isfinite(value)]
                     if finite:
                         markers[method] = float(np.mean(finite))
-            sample_ax = figure.add_subplot(grid[row, 0])
-            rank_curve_axis(sample_ax, sample_curves, saturation=markers,
-                            baseline=baseline_map.get((dataset, *selected_pair)))
-            sample_ax.set_title(LABELS[dataset])
-            if row == 0:
-                sample_ax.legend(frameon=False, ncol=2, fontsize=9,
-                                 handlelength=1.2, columnspacing=.7)
-            if row != 2:
-                sample_ax.set_xlabel("")
-            if row != 1:
-                sample_ax.set_ylabel("")
-            mean_ax = figure.add_subplot(grid[row, 1])
-            normalized_curve_axis(mean_ax, _members(frame))
-            mean_ax.set_title(LABELS[dataset])
-            if row == 0:
-                mean_ax.legend(frameon=False, ncol=2, fontsize=9,
-                               handlelength=1.2, columnspacing=.7)
-            mean_ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])
-            if row != 2:
-                mean_ax.set_xlabel("")
-            if row != 1:
-                mean_ax.set_ylabel("")
-            distribution_ax = figure.add_subplot(
-                saturation_grid[0, row], sharey=first_saturation_ax,
-            )
+            if not distributions_only:
+                sample_ax = figure.add_subplot(grid[row, 0])
+                rank_curve_axis(sample_ax, sample_curves, saturation=markers,
+                                baseline=baseline_map.get((dataset, *selected_pair)),
+                                ylabel=settings["ylabel"])
+                sample_ax.set_title(LABELS[dataset] + (
+                    "\n(fraction of explainable variance)" if fmri_noise_normalized
+                    and dataset == "fmri" and saturation_mode == "explained_variance" else ""),
+                    fontsize=14)
+                if row == 0:
+                    sample_ax.legend(frameon=False, ncol=2, fontsize=9,
+                                     handlelength=1.2, columnspacing=.7)
+                if row != 2:
+                    sample_ax.set_xlabel("")
+                if row != 1:
+                    sample_ax.set_ylabel("")
+                mean_ax = figure.add_subplot(grid[row, 1])
+                normalized_curve_axis(mean_ax, _members(frame, saturation_mode))
+                mean_ax.set_title(LABELS[dataset])
+                if row == 0:
+                    mean_ax.legend(frameon=False, ncol=2, fontsize=9,
+                                   handlelength=1.2, columnspacing=.7)
+                mean_ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])
+                if row != 2:
+                    mean_ax.set_xlabel("")
+                if row != 1:
+                    mean_ax.set_ylabel("")
+            distribution_ax = (distribution_axes[row] if distributions_only else
+                               figure.add_subplot(saturation_grid[0, row],
+                                                  sharey=first_saturation_ax))
             if first_saturation_ax is None:
                 first_saturation_ax = distribution_ax
             labels = [method.upper() if mode == "internal" else method for method in methods]
@@ -176,18 +310,38 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                 ("RRR transfer", "PCA baseline"),
                 ("RRR baseline", "RRR transfer"),
             ]
-            _saturation_comparison_axis(distribution_ax, ranks, methods, labels, tests,
-                                        show_mean_value=True)
+            tick_labels = None
             if mode == "loso":
-                distribution_ax.set_xticklabels(
-                    ["RRR\nbaseline", "RRR\ntransfer", "PCA\nbaseline"],
-                    fontsize=10,
-                )
+                tick_labels = {"RRR baseline": "RRR\nbaseline", "RRR transfer": "RRR\ntransfer",
+                               "PCA baseline": "PCA\nbaseline"}
+            panel_intervals = None
+            if intervals:
+                panel_intervals = {
+                    label: {model: interval for (d, model, m), interval in intervals.items()
+                            if d == dataset and m == method}
+                    for method, label in zip(methods, labels)}
+            _saturation_comparison_axis(distribution_ax, ranks, methods, labels, tests,
+                                        show_mean_value=separate_model is None,
+                                        separate_model=separate_model,
+                                        tick_labels=tick_labels, intervals=panel_intervals)
+            if mode == "loso":
+                distribution_ax.tick_params(axis="x", labelsize=10)
             if row != 0:
                 distribution_ax.set_ylabel("")
                 distribution_ax.tick_params(axis="y", labelleft=False)
             distribution_ax.set_title(LABELS[dataset])
-        figure.subplots_adjust(left=.055, right=.985, top=.89, bottom=.10)
+        if separate_model is not None:
+            add_bracket_headroom(distribution_ax, len(tests))
+        peak_text = ("Peak Performance" if saturation_mode == "quantile"
+                     else "Maximum Explained Variance")
+        title = f"Saturation Distributions ({fraction * 100:g}% {peak_text})"
+        if distributions_only:
+            figure.suptitle(title, fontsize=17)
+            figure.tight_layout(rect=(0, 0, 1, .94))
+            return figure
+        # The explained-variance y label is two lines and needs a wider left margin.
+        figure.subplots_adjust(left=.055 if saturation_mode == "quantile" else .075,
+                               right=.985, top=.89, bottom=.10)
         sample_box = sample_ax.get_position()
         mean_box = mean_ax.get_position()
         saturation_start = first_saturation_ax.get_position()
@@ -199,82 +353,138 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                     "B. Mean Convergence", ha="center",
                     va="bottom", fontsize=15, weight="bold")
         figure.text((saturation_start.x0 + saturation_end.x1) / 2, .965,
-                    f"C. Saturation Distributions ({fraction * 100:g}% Peak Performance)",
+                    f"C. {title}",
                     ha="center", va="bottom", fontsize=15, weight="bold")
         return figure
 
 
-def _cross_auc(frame):
+def _cross_auc(frame, saturation_mode="quantile"):
+    column = _mode(saturation_mode)["column"]
     aucs = defaultdict(dict)
     for (model, layer, method), group in frame.groupby(
         ["model", "layer", "method"], dropna=False
     ):
-        value = normalized_log_rank_auc(group["rank"], group["correlation"])
+        value = normalized_log_rank_auc(group["rank"], group[column])
         if np.isfinite(value):
             aucs[(model, _layer(layer))][method] = value
     return aucs
 
 
-def cross_aggregate(cross):
-    """Six directed panels and the three current normalized-AUC comparisons."""
+@with_model_legend
+def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
+                    distributions_only=False, intervals=None):
+    """Six directed panels and the three current normalized-AUC comparisons.
+
+    `separate_model` draws that model's layers as their own AUC-difference violins instead of
+    pooling them. `distributions_only` draws just those three distribution panels. `intervals`
+    maps `(target, source, model, comparison title)` to a bootstrap interval in AUC-difference
+    units, drawn as a whisker through each model-mean square.
+
+    For `saturation_mode="explained_variance"` pass the explained-variance cross frame.
+    """
     with paper_style():
-        figure = plt.figure(figsize=(21, 10.5))
-        grid = figure.add_gridspec(3, 6)
-        left = grid[:, :3].subgridspec(2, 3, hspace=.28, wspace=.10)
-        right = grid[:, 3:].subgridspec(3, 1, hspace=.30)
+        if distributions_only:
+            figure = plt.figure(figsize=(12, 12))
+            right = figure.add_gridspec(3, 1, hspace=.30)
+        else:
+            figure = plt.figure(figsize=(21, 10.5))
+            grid = figure.add_gridspec(3, 6)
+            left = grid[:, :3].subgridspec(2, 3, hspace=.28, wspace=.10)
+            right = grid[:, 3:].subgridspec(3, 1, hspace=.30)
         comparisons = [
             ("Within RRR − Transfer RRR", "Within RRR", "Transfer RRR"),
             ("Transfer RRR − Transfer PCA", "Transfer RRR", "Transfer PCA"),
             ("Within PCA − Transfer PCA", "Within PCA", "Transfer PCA"),
         ]
         groups = [defaultdict(list) for _ in comparisons]
+        group_models = [defaultdict(list) for _ in comparisons]
+        separate_groups = [defaultdict(list) for _ in comparisons]
+        separate_models = [defaultdict(list) for _ in comparisons]
         first_directed_ax = None
+        directions = {}  # direction label -> (target, source)
         for index, (target, source) in enumerate(
             (t, s) for t in DATASETS for s in DATASETS if s != t
         ):
             panel = cross[(cross["target_dataset"] == target)
                           & (cross["source_dataset"] == source)]
-            ax = figure.add_subplot(
-                left[index % 2, index // 2], sharey=first_directed_ax,
-            )
-            if first_directed_ax is None:
-                first_directed_ax = ax
-            normalized_curve_axis(ax, _members(panel))
-            ax.set_title(f"{LABELS[source]} → {LABELS[target]}", fontsize=13)
-            ax.set_xlabel("")
-            if index // 2 != 0:
-                ax.set_ylabel("")
-                ax.tick_params(axis="y", labelleft=False)
-            ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])
-            if index % 2 == 1 and index // 2 > 0:
-                ax.set_xticks([0, .01, .1, 1], ["", "1%", "10%", "100%"])
-            ax.tick_params(axis="both", labelsize=10)
-            ax.tick_params(axis="x", labelbottom=index % 2 == 1)
-            if index == 0:
-                ax.legend(frameon=False, fontsize=8, ncol=2,
-                          handlelength=1.2, columnspacing=.7)
+            if not distributions_only:
+                ax = figure.add_subplot(
+                    left[index % 2, index // 2], sharey=first_directed_ax,
+                )
+                if first_directed_ax is None:
+                    first_directed_ax = ax
+                normalized_curve_axis(ax, _members(panel, saturation_mode))
+                ax.set_title(f"{LABELS[source]} → {LABELS[target]}", fontsize=13)
+                ax.set_xlabel("")
+                if index // 2 != 0:
+                    ax.set_ylabel("")
+                    ax.tick_params(axis="y", labelleft=False)
+                ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])
+                if index % 2 == 1 and index // 2 > 0:
+                    ax.set_xticks([0, .01, .1, 1], ["", "1%", "10%", "100%"])
+                ax.tick_params(axis="both", labelsize=10)
+                ax.tick_params(axis="x", labelbottom=index % 2 == 1)
+                if index == 0:
+                    ax.legend(frameon=False, fontsize=8, ncol=2,
+                              handlelength=1.2, columnspacing=.7)
             label = f"{LABELS[source]} → {LABELS[target]}"
-            for values in _cross_auc(panel).values():
-                for output, (_, first, second) in zip(groups, comparisons):
+            directions[label] = (target, source)
+            for (model, _), values in _cross_auc(panel, saturation_mode).items():
+                is_separate = model == separate_model
+                targets = (separate_groups, separate_models) if is_separate else (groups, group_models)
+                for output, models, (_, first, second) in zip(*targets, comparisons):
                     if first in values and second in values:
                         output[label].append(values[first] - values[second])
+                        models[label].append(model)
         for row, (output, (title, _, _)) in enumerate(zip(groups, comparisons)):
             ax = figure.add_subplot(right[row, 0])
-            distribution_axis(ax, output, show_points=True)
+            point_models = group_models[row]
+            colors = {}
+            for label, values in separate_groups[row].items():
+                output[separate_label(label)] = values
+                point_models[separate_label(label)] = separate_models[row][label]
+                colors[separate_label(label)] = separate_color(COLORS["rrr"])
+            model_intervals = None
+            if intervals:
+                model_intervals = {}
+                for group in output:
+                    target, source = directions[group.removesuffix(separate_label(""))]
+                    model_intervals[group] = {
+                        model: interval for (t, src, model, name), interval in intervals.items()
+                        if (t, src, name) == (target, source, title)}
+            distribution_axis(ax, output, show_points=True, point_models=point_models,
+                              label_colors=colors, model_intervals=model_intervals)
             ax.axhline(0, color="#111827", linestyle="--", linewidth=1)
             ax.set_title(title, fontsize=14)
             ax.set_ylabel("Normalized AUC difference" if row == 1 else "")
             ax.tick_params(axis="x", labelbottom=row == 2, labelsize=10)
+            if separate_groups[row]:
+                n_main = len(groups[row]) - len(separate_groups[row])
+                separate_group_captions(ax, n_main, len(groups[row]), offset=95,
+                                        captions=row == 2)
             if row == 2:
+                if separate_groups[row]:
+                    ax.set_xticklabels([text.get_text().removesuffix(separate_label(""))
+                                        for text in ax.get_xticklabels()])
                 plt.setp(ax.get_xticklabels(), rotation=28, ha="right", fontsize=10)
                 ax.set_xlabel("Directed source → target comparison", fontsize=13)
-            for position, values in enumerate(output.values(), start=1):
+            for position, (group, values) in enumerate(output.items(), start=1):
                 if values:
-                    p = paired_sign_flip(values, np.zeros(len(values)), alternative="greater")
-                    label = "*" if p < .05 else "n.s."
-                    ax.text(position, .97, f"{label} {format_p_value(p)}",
-                            transform=ax.get_xaxis_transform(),
-                            ha="center", va="top", fontsize=10)
+                    p = model_sign_flip(values, np.zeros(len(values)), point_models[group],
+                                        alternative="greater")
+                    mark = "*" if p < .05 else "n.s."
+                    # Twelve narrow groups: stack the p-value vertically so labels never collide.
+                    ax.text(position, .98,
+                            "no test (1 model)" if np.isnan(p) else f"{mark} {format_p_value(p)}",
+                            transform=ax.get_xaxis_transform(), ha="center", va="top",
+                            fontsize=9 if separate_groups[row] else 10,
+                            rotation=90 if separate_groups[row] else 0)
+            if separate_groups[row]:
+                add_bracket_headroom(ax, 1, extra=.18)
+        if distributions_only:
+            figure.suptitle("Normalized AUC Differences", fontsize=17)
+            figure.tight_layout(rect=(0, 0, 1, .96))
+            return figure
         figure.subplots_adjust(left=.045, right=.99, top=.88, bottom=.15,
                                hspace=.48, wspace=.42)
         left_start, left_end = (grid[0, column].get_position(figure) for column in (0, 2))
@@ -290,7 +500,7 @@ def cross_aggregate(cross):
         return figure
 
 
-def cross_gap_scatter(cross):
+def cross_gap_scatter(cross, saturation_mode="quantile"):
     """Correlate matched internal-minus-transfer PCA and RRR AUC gaps."""
     with paper_style():
         figure, ax = plt.subplots(figsize=(10.5, 7))
@@ -304,7 +514,7 @@ def cross_gap_scatter(cross):
             points = np.asarray([
                 (item["Within PCA"] - item["Transfer PCA"],
                  item["Within RRR"] - item["Transfer RRR"])
-                for item in _cross_auc(panel).values()
+                for item in _cross_auc(panel, saturation_mode).values()
                 if {"Within PCA", "Transfer PCA", "Within RRR", "Transfer RRR"} <= item.keys()
             ]).reshape(-1, 2)
             if len(points):
@@ -515,6 +725,7 @@ def _quantile_robustness_values(quantiles, dataset, *, fraction=.99):
     return values
 
 
+@with_model_legend
 def quantile_saturation_robustness(quantiles, *, fraction=.99):
     """Separate internal RRR/PCA robustness comparison using target quantiles."""
     with paper_style():
@@ -535,8 +746,18 @@ def quantile_saturation_robustness(quantiles, *, fraction=.99):
         return figure
 
 
-def sensitivity_grid(results, values, *, mode="internal", variable="fraction"):
-    """Compare paired saturation ranks across peak fractions or internal cutoffs."""
+@with_model_legend
+def sensitivity_grid(results, values, *, mode="internal", variable="fraction",
+                     saturation_mode="quantile"):
+    """Compare paired saturation ranks across peak fractions or internal cutoffs.
+
+    `results` is the quantile dictionary, or the explained-variance `curves` /
+    `loso_curves` dictionary for `saturation_mode="explained_variance"` (which has no
+    minimum-peak cutoff, so only `variable="fraction"` applies).
+    """
+    _mode(saturation_mode)
+    if saturation_mode == "explained_variance" and variable == "floor":
+        raise ValueError("explained-variance saturation has no minimum-peak cutoff")
     values = tuple(values)
     if not values:
         raise ValueError("values must contain at least one sensitivity setting")
@@ -564,9 +785,10 @@ def sensitivity_grid(results, values, *, mode="internal", variable="fraction"):
                 ranks = (_saturation_values(
                     results, dataset, methods, .99 if variable == "floor" else value,
                     min_peak=value if variable == "floor" else PEAK_FLOOR,
+                    saturation_mode=saturation_mode,
                 )
                          if mode == "internal" else
-                         _loso_saturation_values(results, dataset, value))
+                         _loso_saturation_values(results, dataset, value, saturation_mode))
                 ax = axes[row, col]
                 _saturation_comparison_axis(
                     ax, ranks, methods, labels, tests, show_mean_value=True,
@@ -584,8 +806,11 @@ def sensitivity_grid(results, values, *, mode="internal", variable="fraction"):
                     ax.set_ylabel("")
                     ax.tick_params(axis="y", labelleft=False)
         title = "Internal" if mode == "internal" else "Leave-one-subject-out"
-        setting = "minimum quantile peak correlation" if variable == "floor" else "required peak fraction"
-        figure.suptitle(f"{title} RRR quantile saturation sensitivity: {setting}")
+        setting = ("minimum quantile peak correlation" if variable == "floor"
+                   else "required fraction of maximum explained variance"
+                   if saturation_mode == "explained_variance" else "required peak fraction")
+        basis = "quantile" if saturation_mode == "quantile" else "explained-variance"
+        figure.suptitle(f"{title} RRR {basis} saturation sensitivity: {setting}")
         figure.text(.015, .5, "Saturation rank $k$", rotation=90,
                     va="center", ha="center", fontsize=14)
         figure.subplots_adjust(left=.18 if variable == "floor" else .13,

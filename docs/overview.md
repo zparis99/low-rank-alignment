@@ -132,9 +132,16 @@ HDF5 container while keeping plots as separately browsable PNG files.
   completed RRR, significance, and decoding results once at startup, reports
   missing directed results, and draws the aggregate, encoding, significance,
   quantile, and paired RRR/PCA saturation-sensitivity figures from compact
-  in-memory data. Saturation is the latest interpolated first crossing of 99%
-  of each eligible target quantile's own peak, treating curves as monotonic and
-  excluding peaks at or below 0.005. Internal and LOSO sensitivity analyses vary
+  in-memory data. All rank results are read through `Artifact.load_rank_matrix`.
+  The main figures (internal/LOSO aggregates, directed cross-dataset aggregate and
+  AUC-gap scatter, and fraction-of-peak sensitivity) use *explained-variance
+  saturation*: each curve is the mean squared correlation per target (negatives
+  clipped to zero, folds Fisher-averaged first, all electrode-lag pairs or voxels
+  pooled), and saturation is the first interpolated rank reaching 99% of the
+  curve's own maximum, treating it as monotonic (no peak cutoff). The target-quantile
+  versions live in an appendix section: there saturation is the latest interpolated
+  first crossing of 99% of each eligible target quantile's own peak, treating
+  curves as monotonic and excluding peaks at or below 0.005. Internal and LOSO sensitivity analyses vary
   the required peak percentage. Internal cutoff sensitivity also compares
   minimum peaks of 0, 0.005, and 0.01 at a fixed 99% threshold.
   LOSO averages each subject's saturation rank
@@ -170,19 +177,51 @@ HDF5 container while keeping plots as separately browsable PNG files.
   subject-matched RRR control from the full internal training run.
   A fingerprinted cache under `results/` makes later starts fast while artifact
   manifests and metric code are unchanged.
-  Run `uv run python notebooks/final_plots.py --output-dir figures` to export all
-  thirteen figures as PDF, 300-DPI PNG, and SVG, plus the significance LaTeX table and
-  a result-gap report. `--format pdf`, `--format png`, or `--format svg` selects one format.
+  Run `uv run python notebooks/final_plots.py --output-dir figures` to export the main
+  figures (explained-variance saturation, the default `--saturation-mode
+  explained_variance`) as PDF, 300-DPI PNG, and SVG, plus the significance LaTeX table and
+  a result-gap report. `--saturation-mode quantile` instead writes the quantile appendix
+  figures to `figures/quantile/`. `--format pdf`, `--format png`, or `--format svg` selects one format.
+  `--all` exports every notebook figure in one run: the explained-variance set (including the
+  shuffled-embedding internal aggregate, `rrr_internal_aggregate_shuffled`, plus any shuffled
+  result gaps in `result_gaps.txt`), the quantile appendix in `quantile/`, and the raw-fMRI-r^2
+  appendix in `raw_fmri/`.
   `--example-model gpt2 --example-layer 6` selects the sample curves in both
   RRR aggregates and the target-quantile figure (default: GPT-2 layer 0);
   `--loso-example-model` and `--loso-example-layer` override the LOSO example.
   Use layer `none` for layerless models. Examples must have the notebook's
   required curves for all three datasets; invalid selections report available
   pairs before writing figures. Existing export filenames are replaced.
+  The export and the notebook's final "dimensionality and subspace consistency" appendix
+  (`src/utils/plotting/final_subspace_data.py`, `final_subspace_figures.py`; results cached in
+  `results/final_subspace_cache/`) cover: fMRI explained-variance-vs-noise-ceiling histograms,
+  neural and embedding PCA dimensionality (Podcast, Cars 2, fMRI), the ROI RRR-vs-PCA figures, and
+  RRR-vs-PCA subspace overlap / squared cosines of the principal angles (LOSO and cross-dataset). Datasets whose
+  results or raw data are missing (e.g. fMRI LOSO off the remote host) render as empty panels.
+  **Statistics and conventions in the final figures.** fMRI explained variance is always the
+  noise-normalized fraction of explainable variance (`r^2 / max(CC_max, 0.25)^2` per voxel, voxels
+  without a ceiling dropped; `_ev_scale` in `final_data.py`); Podcast and Cars 2 have no noise ceiling and use
+  raw `r^2`. `load_final_data(..., fmri_noise_normalized=False)` gives the raw-`r^2` fMRI tables used by the
+  notebook's appendix ("fMRI without noise normalization", cached separately). Random GPT-2 is left out of
+  the main figures and shown only in companion figures as its own violins; GloVe is included. Layers of a
+  model are not independent, so every significance test averages layers within each model and runs an exact
+  paired sign-flip test across models (`model_sign_flip` in `plot_metrics.py`; the smallest possible p is
+  1/2^n, e.g. 0.016 for six models, 0.0625 for four). In the distribution plots dots are layers, squares are
+  model means and the diamond is their mean; an optional notebook toggle adds 95% bootstrap intervals on the
+  model means (`final_bootstrap.py`): subjects are resampled (Cars 2: depth probes), weighted by target count,
+  and each draw averages a model's layers in log2 saturation rank; LOSO resamples held-out subjects.
+  The notebook's "Shuffled-embedding null control" section redraws the internal RRR aggregate from
+  `results/run_rrr_shuffled/` via `load_shuffled_internal_data` (internal mode only, uncached) for
+  comparison with the main internal figure.
   Running without arguments retains interactive notebook execution.
   Shared artifact-independent rank calculations live in
   `src/utils/rrr/plot_metrics.py`; reusable axis and figure functions live in
   `src/utils/plotting/`.
+- `notebooks/roi.py` holds fMRI flat-map and noise-ceiling exploration. Its last cells (`src/utils/plotting/roi_saturation.py`) draw two ROI-row by dataset-column figures from mean-r^2-per-target curves restricted to each bihemispheric ROI (Destrieux labels for all three datasets, including Cars 2 via MNI coordinates), pooled over all model layers: normalized saturation curves, and paired RRR-vs-PCA saturation-rank distributions. Its bottom
+  cells draw a model (row) by layer (column) grid of per-voxel histograms of explained
+  variance relative to the noise ceiling, `clip(r, 0)^2 / max(CC_max, 0.25)^2`, with r
+  taken at each voxel's saturation rank (first tested rank reaching 99% of its peak),
+  pooled over all subjects, unsmoothed, dropping voxels with undefined CC_max.
 - `notebooks/plots.py` provides interactive RRR/PCA comparisons, including aggregate
   landscape figures for internal, leave-one-subject-out, and directed cross-dataset
   RRR. Internal and leave-one-subject-out views stack selected model/layer plots

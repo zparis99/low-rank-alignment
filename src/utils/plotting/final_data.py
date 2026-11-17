@@ -7,12 +7,15 @@ never receive an Artifact or open a result file.
 from __future__ import annotations
 
 from collections import defaultdict
+from functools import lru_cache
 import hashlib
 import json
 import os
 from pathlib import Path
 import pickle
 import tempfile
+import warnings
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -21,7 +24,9 @@ from scripts.run_rrr import Artifact as RRRArtifact
 from scripts.run_significance import Artifact as SignificanceArtifact
 from scripts.run_language_decoding import Artifact as DecodingArtifact
 from scripts.utilities.check_final_significance import MODEL_LAYERS
-from src.utils.rrr.plot_metrics import fisher_mean, rank_quantiles
+from src.utils.rrr.plot_metrics import (
+    explained_variance_curve, fisher_mean, rank_quantiles,
+)
 
 
 DATASETS = {"podcast": "podcast", "cars-2": "brain-treebank-cars-2", "fmri": "deep-fmri"}
@@ -29,8 +34,56 @@ QUANTILES = (.05, .10, .25, .50, .75, .90)
 LABELS = {"podcast": "Podcast", "cars-2": "Cars 2", "fmri": "fMRI"}
 PAIRS = tuple((model, layer) for model, layers in MODEL_LAYERS.values() for layer in layers)
 FMRI_VARIANT = "input_scaling-pooled-training-stories-v1"
-CACHE_VERSION = 2
+CC_MAX_FLOOR = 0.25  # noise ceilings below this are floored (as in the fMRI histograms)
+CACHE_VERSION = 4
 LAG_SUMMARIES = ("mean", "peak")
+SATURATION_MODES = ("explained_variance", "quantile")
+
+
+class ExplainedVarianceData(NamedTuple):
+    """Explained-variance counterparts of the correlation curve tables.
+
+    The frames mirror `internal`, `loso` and `cross` with an `explained_variance`
+    column (mean r^2 per target) in place of `correlation`. `curves` and
+    `loso_curves` mirror the quantile dictionaries, keyed the same way, with a
+    (ranks, curve) pair. `full_rows` holds (dataset, model, layer, mean r^2) for the
+    full-model reference.
+    """
+
+    internal: pd.DataFrame
+    loso: pd.DataFrame
+    cross: pd.DataFrame
+    curves: dict
+    loso_curves: dict
+    full_rows: list
+
+@lru_cache(maxsize=None)
+def _noise_ceiling(results_root, subject):
+    path = Path(results_root) / "fmri_noise_ceiling" / f"{subject}.npz"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found; run scripts/fmri/compute_noise_ceiling.py")
+    with np.load(path) as archive:
+        return archive["cc_max"].astype(float)
+
+
+def _ev_scale(results_root, dataset, targets, normalize=True):
+    """Per-target divisor of the explained variance: squared (floored) noise ceiling for fMRI.
+
+    fMRI explained variance is always reported as a fraction of the explainable variance,
+    r^2 / max(CC_max, CC_MAX_FLOOR)^2 per voxel; voxels without a defined ceiling are
+    left out. iEEG has no noise ceiling (returns None: plain r^2), and neither does fMRI with
+    `normalize=False` (the appendix's raw-r^2 version).
+    """
+    if dataset != "fmri" or not normalize:
+        return None
+    subjects = targets["subject"].astype(str).to_numpy()
+    ceiling = np.full(len(targets), np.nan)
+    for subject in np.unique(subjects):
+        rows = subjects == subject
+        ceiling[rows] = _noise_ceiling(str(results_root), subject)[
+            targets.loc[rows, "voxel_index"].to_numpy().astype(int)]
+    return np.maximum(ceiling, CC_MAX_FLOOR) ** 2
+
 
 def _cache_fingerprint(results_root, lag_summary="mean"):
     """Track artifact manifests and summary code without opening large payloads."""
@@ -91,10 +144,10 @@ def _variant(artifact, dataset, mode, source=None):
     return artifact
 
 
-def _rrr(results_root, mode, dataset, model, layer, source=None):
+def _rrr(results_root, mode, dataset, model, layer, source=None, shuffled_embeddings=False):
     artifact = RRRArtifact(
         mode=mode, dataset=DATASETS[dataset], model=model, layer=layer,
-        results_root=results_root,
+        results_root=results_root, shuffled_embeddings=shuffled_embeddings,
     )
     return _variant(artifact, dataset, mode, source)
 
@@ -172,89 +225,110 @@ def _metric_name(dataset, method, *, phase=None):
     return "nr_orth_corr_per_target" if method == "rrr" else "pca_corr_per_target"
 
 
-def _quantiles_from_values(values_by_rank):
-    ranks, target_rows = [], []
-    for rank, arrays in sorted(values_by_rank.items()):
-        lengths = {len(a) for a in arrays}
-        if len(lengths) != 1:
-            raise ValueError(f"target count changes at rank {rank}")
-        ranks.append(rank)
-        target_rows.append(fisher_mean(np.stack(arrays), axis=0))
-    return np.asarray(ranks, dtype=float), rank_quantiles(ranks, np.stack(target_rows), QUANTILES)
+def _fisher(values, axis=None):
+    """`fisher_mean` that stays quiet for all-NaN slices (missing target sets)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return fisher_mean(values, axis=axis)
 
 
-def _internal_subject_rrr(rank_metrics, manifest, metric_name, collapsed_by_rank,
-                          lag_summary="mean"):
-    """Get full-training RRR curves and target quantiles for each subject."""
-    if manifest is None or "subject" not in manifest:
-        return [], {}
-    raw_subjects = manifest["subject"].astype(str).to_numpy()
-    groups, count = _groups(manifest, len(raw_subjects))
-    target_subjects = np.empty(count, dtype=object)
-    target_subjects[groups] = raw_subjects
-    subjects = np.unique(raw_subjects)
-    raw_masks = {subject: raw_subjects == subject for subject in subjects}
-    target_masks = {subject: target_subjects == subject for subject in subjects}
-    curve_folds = defaultdict(list)
-    if lag_summary == "peak":
-        for rank, values in collapsed_by_rank.items():
-            for subject in subjects:
-                curve_folds[(subject, rank)].append(
-                    float(fisher_mean(values[0][target_masks[subject]]))
-                )
+def _load_matrix(artifact, method, metric, selectors=None):
+    """Standard `Artifact.load_rank_matrix` call; None when the method has no metrics."""
+    try:
+        return artifact.load_rank_matrix(method, metric=metric, selectors=selectors)
+    except ValueError as error:
+        if str(error).startswith("no per-target rank metrics"):
+            return None
+        raise
+
+
+def _lagged(matrix):
+    """RankMatrix values as [rank, fold, target, lag]; fMRI gets one trivial lag."""
+    values = np.asarray(matrix.values, dtype=float)
+    return values if values.ndim == 4 else values[..., None]
+
+
+def _summarize(values, ranks, lag_summary, ev_scale=None):
+    """Every figure summary of one method's [rank, fold, target, lag] correlations.
+
+    Returns `fold_values` (the mean correlation per rank and fold; one column for
+    "peak"), the target-quantile curves used in quantile saturation mode, and `ev`,
+    the explained-variance curve used in explained-variance mode. `ev` always
+    spans all (target, lag) pairs, so it does not depend on `lag_summary`. `ev_scale`
+    ([target], see `_ev_scale`) divides each target's r^2 (fMRI noise ceiling).
+    """
+    ranks = np.asarray(ranks, dtype=float)
+    if lag_summary == "mean":
+        targets = _fisher(values, axis=3)
+        fold_values = _fisher(values, axis=(2, 3))
+    elif lag_summary == "peak":
+        peaks = np.fmax.reduce(_fisher(values, axis=1), axis=2)
+        targets = peaks[:, None, :]
+        fold_values = _fisher(peaks, axis=1)[:, None]
     else:
-        for encoded, metrics in rank_metrics.items():
-            selector = dict(encoded)
-            if selector.get("method") != "rrr" or "rank" not in selector or metric_name not in metrics:
-                continue
-            rank = int(selector["rank"])
-            raw = np.asarray(metrics[metric_name], dtype=float).reshape(-1)
-            if len(raw) != len(raw_subjects):
-                raise ValueError(f"internal RRR rank {rank} has {len(raw)} targets; expected {len(raw_subjects)}")
-            for subject in subjects:
-                curve_folds[(subject, rank)].append(float(fisher_mean(raw[raw_masks[subject]])))
-    curves = [(subject, "RRR baseline", rank, float(fisher_mean(values)))
-              for (subject, rank), values in curve_folds.items()]
-    quantiles = {}
-    for subject in subjects:
-        by_rank = {rank: [values[target_masks[subject]] for values in folds]
-                   for rank, folds in collapsed_by_rank.items()}
-        if by_rank:
-            quantiles[(subject, "RRR baseline")] = _quantiles_from_values(by_rank)
-    return curves, quantiles
+        raise ValueError(f"lag_summary must be one of {LAG_SUMMARIES}, got {lag_summary!r}")
+    per_target = _fisher(targets, axis=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        quantiles = rank_quantiles(ranks, per_target, QUANTILES)
+    return {
+        "ranks": ranks,
+        "fold_values": fold_values,
+        "quantiles": (ranks, quantiles),
+        "ev": explained_variance_curve(
+            _fisher(values, axis=1),
+            scale=None if ev_scale is None else np.asarray(ev_scale)[:, None]),
+    }
 
 
-def _internal_one(results_root, dataset, model, layer, lag_summary="mean"):
-    artifact = _rrr(results_root, "internal", dataset, model, layer).load_artifacts(
-        ["rank_metrics", "target_manifest", "full_metrics"]
+def _curve_rows(summary):
+    return [(int(rank), float(value))
+            for rank, row in zip(summary["ranks"], summary["fold_values"])
+            for value in row if np.isfinite(value)]
+
+
+def _subject_summaries(matrix, values, lag_summary, ev_scale=None):
+    """Per-subject RRR curves from a pooled internal run (the LOSO full-training control)."""
+    if "subject" not in matrix.targets:
+        return [], {}, {}
+    target_subjects = matrix.targets["subject"].astype(str).to_numpy()
+    curves, quantiles, ev = [], {}, {}
+    for subject in np.unique(target_subjects):
+        rows = target_subjects == subject
+        summary = _summarize(values[:, :, rows, :], matrix.ranks, lag_summary,
+                             None if ev_scale is None else ev_scale[rows])
+        curves.extend(
+            (subject, "RRR baseline", int(rank), float(_fisher(row)))
+            for rank, row in zip(summary["ranks"], summary["fold_values"])
+            if np.isfinite(row).any()
+        )
+        quantiles[(subject, "RRR baseline")] = summary["quantiles"]
+        ev[(subject, "RRR baseline")] = (summary["ranks"], summary["ev"])
+    return curves, quantiles, ev
+
+
+def _internal_one(results_root, dataset, model, layer, lag_summary="mean",
+                  fmri_noise_normalized=True, shuffled_embeddings=False):
+    artifact = _rrr(results_root, "internal", dataset, model, layer,
+                    shuffled_embeddings=shuffled_embeddings).load_artifacts(
+        ["target_manifest", "full_metrics"]
     )
     lag_summary = _summary_for(dataset, lag_summary)
-    curves, target_values, raw_folds = [], {}, defaultdict(list)
-    for encoded, metrics in artifact.rank_metrics.items():
-        selector = dict(encoded)
-        method, rank = selector.get("method"), selector.get("rank")
-        if method not in {"rrr", "pca"} or rank is None:
+    curves, quantiles, ev, rrr = [], {}, {}, None
+    for method in ("rrr", "pca"):
+        matrix = _load_matrix(artifact, method, _metric_name(dataset, method))
+        if matrix is None:
             continue
-        name = _metric_name(dataset, method)
-        if name not in metrics:
-            continue
-        raw = np.asarray(metrics[name], dtype=float)
-        if lag_summary == "mean":
-            curves.append((method, int(rank), float(fisher_mean(raw))))
-        raw_folds[(method, int(rank))].append(raw)
-    for (method, rank), folds in raw_folds.items():
-        target_values[(method, rank)] = _electrode_values(
-            folds, _manifest_for(artifact, {"method": method}), lag_summary
-        )
-        if lag_summary == "peak":
-            curves.append((method, rank, float(fisher_mean(target_values[(method, rank)][0]))))
+        values = _lagged(matrix)
+        scale = _ev_scale(results_root, dataset, matrix.targets, fmri_noise_normalized)
+        summary = _summarize(values, matrix.ranks, lag_summary, scale)
+        curves.extend((method, rank, value) for rank, value in _curve_rows(summary))
+        quantiles[method] = summary["quantiles"]
+        ev[method] = (summary["ranks"], summary["ev"])
+        if method == "rrr":
+            rrr = (matrix, values, scale)
     if not curves:
         raise ValueError("no internal rank correlations")
-    quantiles = {}
-    for method in ("rrr", "pca"):
-        by_rank = {rank: values for (item_method, rank), values in target_values.items() if item_method == method}
-        if by_rank:
-            quantiles[method] = _quantiles_from_values(by_rank)
     full_folds = []
     for encoded, metrics in artifact.full_metrics.items():
         selector = dict(encoded)
@@ -266,92 +340,86 @@ def _internal_one(results_root, dataset, model, layer, lag_summary="mean"):
     full = (_electrode_values(full_folds, _manifest_for(artifact, {"method": "rrr"}), lag_summary)
             if full_folds else [])
     full_values = fisher_mean(np.stack(full), axis=0) if full else np.array([])
-    subject_curves, subject_quantiles = _internal_subject_rrr(
-        artifact.rank_metrics, _manifest_for(artifact, {"method": "rrr"}),
-        _metric_name(dataset, "rrr"),
-        {rank: values for (method, rank), values in target_values.items()
-         if method == "rrr"},
-        lag_summary,
-    )
-    return curves, quantiles, full_values, subject_curves, subject_quantiles
+    full_ev = np.nan
+    if full_folds:
+        pairs = _fisher(np.stack([np.asarray(f, dtype=float).reshape(-1) for f in full_folds]),
+                        axis=0)
+        full_scale = rrr[2] if rrr is not None else None
+        if full_scale is not None and len(full_scale) != pairs.shape[0]:
+            raise ValueError("full-model targets do not match the rank-curve targets")
+        full_ev = float(explained_variance_curve(pairs[None, :], scale=full_scale)[0])
+    subject = (_subject_summaries(rrr[0], rrr[1], lag_summary, rrr[2]) if rrr is not None
+               else ([], {}, {}))
+    return curves, quantiles, ev, full_values, full_ev, subject
 
 
-def _loso_one(results_root, dataset, model, layer, lag_summary="mean"):
+def _loso_one(results_root, dataset, model, layer, lag_summary="mean",
+              fmri_noise_normalized=True):
     artifact = _rrr(results_root, "leave_one_subject_out", dataset, model, layer).load_artifacts(
         ["target_manifest"]
     )
     names = {("rrr", "transfer"): "RRR transfer", ("pca", "baseline"): "PCA baseline"}
     lag_summary = _summary_for(dataset, lag_summary)
-    curves, target_values = [], {}
-    raw_folds, raw_manifests = defaultdict(list), {}
-    rank_metrics = {}
-    for method, phase in names:
-        rank_metrics.update(artifact.load_collection(
-            "rank_metrics", {"method": method, "loso_phase": phase}
-        ))
-    for encoded, metrics in rank_metrics.items():
-        selector = dict(encoded)
-        key = (selector.get("method"), selector.get("loso_phase"))
-        if key not in names or "rank" not in selector:
-            continue
-        name = _metric_name(dataset, key[0], phase=key[1])
-        if name not in metrics:
-            continue
-        rank, subject = int(selector["rank"]), str(selector["held_out_subject"])
-        raw = np.asarray(metrics[name], dtype=float)
-        if lag_summary == "mean":
-            curves.append((subject, names[key], rank, float(fisher_mean(raw))))
-        item = (subject, names[key], rank)
-        raw_folds[item].append(raw)
-        raw_manifests[item] = _manifest_for(artifact, selector)
-    for item, folds in raw_folds.items():
-        target_values[item] = _electrode_values(folds, raw_manifests[item], lag_summary)
-        if lag_summary == "peak":
-            curves.append((*item, float(fisher_mean(target_values[item][0]))))
-    quantiles = {}
-    for subject, method, _ in target_values:
-        by_rank = {rank: values for (s, m, rank), values in target_values.items()
-                   if s == subject and m == method}
-        quantiles[(subject, method)] = _quantiles_from_values(by_rank)
-    return curves, quantiles
+    curves, quantiles, ev = [], {}, {}
+    for (method, phase), label in names.items():
+        held_out = sorted({dict(key)["held_out_subject"] for key in artifact.target_manifest
+                           if dict(key).get("method") == method
+                           and dict(key).get("loso_phase") == phase
+                           and "held_out_subject" in dict(key)}, key=str)
+        for subject in held_out:
+            matrix = _load_matrix(
+                artifact, method, _metric_name(dataset, method, phase=phase),
+                {"loso_phase": phase, "held_out_subject": subject},
+            )
+            if matrix is None:
+                continue
+            summary = _summarize(_lagged(matrix), matrix.ranks, lag_summary,
+                                 _ev_scale(results_root, dataset, matrix.targets,
+                                           fmri_noise_normalized))
+            curves.extend((str(subject), label, rank, value)
+                          for rank, value in _curve_rows(summary))
+            quantiles[(str(subject), label)] = summary["quantiles"]
+            ev[(str(subject), label)] = (summary["ranks"], summary["ev"])
+    return curves, quantiles, ev
 
 
 def _cross_one(results_root, target, source, model, layer, internal_curves,
-               lag_summary="mean"):
-    artifact = _rrr(results_root, "cross_dataset", target, model, layer, source).load_artifacts(
-        ["rank_metrics", "target_manifest"]
-    )
+               internal_ev, lag_summary="mean", fmri_noise_normalized=True):
+    artifact = _rrr(results_root, "cross_dataset", target, model, layer, source)
     lag_summary = _summary_for(target, lag_summary)
-    records, raw_folds = [], defaultdict(list)
-    for encoded, metrics in artifact.rank_metrics.items():
-        selector = dict(encoded)
-        method, rank = selector.get("method"), selector.get("rank")
-        if method not in {"rrr", "pca"} or rank is None:
-            continue
+    records, ev_records = [], []
+    for method in ("rrr", "pca"):
+        label = f"Transfer {method.upper()}"
         if target == "fmri":
-            name = "corr_per_target"
+            candidates = ("corr_per_target",)
         elif method == "rrr":
-            name = "nr_orth_corr" if "nr_orth_corr" in metrics else "nr_corr"
+            candidates = ("nr_orth_corr_per_target", "nr_corr_per_target")
         else:
-            name = "pca_corr"
-        if lag_summary == "peak":
-            name = f"{name}_per_target"
-            if name in metrics:
-                raw_folds[(method, int(rank))].append(metrics[name])
-        elif name in metrics:
-            records.append((f"Transfer {method.upper()}", int(rank), float(fisher_mean(metrics[name]))))
-    for (method, rank), folds in raw_folds.items():
-        values = _electrode_values(folds, _manifest_for(artifact, {"method": method}), "peak")[0]
-        records.append((f"Transfer {method.upper()}", rank, float(fisher_mean(values))))
+            candidates = ("pca_corr_per_target",)
+        matrix = next((m for m in (_load_matrix(artifact, method, name)
+                                   for name in candidates) if m is not None), None)
+        if matrix is None:
+            continue
+        summary = _summarize(_lagged(matrix), matrix.ranks, lag_summary,
+                             _ev_scale(results_root, target, matrix.targets,
+                                       fmri_noise_normalized))
+        records.extend((label, rank, value) for rank, value in _curve_rows(summary))
+        ev_records.extend((label, int(rank), float(value))
+                          for rank, value in zip(summary["ranks"], summary["ev"]))
     for method, rank, value in internal_curves:
         records.append((f"Within {method.upper()}", rank, value))
+    for method, (ranks, curve) in internal_ev.items():
+        ev_records.extend((f"Within {method.upper()}", int(rank), float(value))
+                          for rank, value in zip(ranks, curve))
+    required = {"Within RRR", "Within PCA", "Transfer RRR", "Transfer PCA"}
     frame = pd.DataFrame(records, columns=["method", "rank", "correlation"])
-    if not {"Within RRR", "Within PCA", "Transfer RRR", "Transfer PCA"}.issubset(frame["method"]):
+    if not required.issubset(frame["method"]):
         raise ValueError("incomplete four-method directed curves")
     frame["fisher_z"] = np.arctanh(np.clip(frame.pop("correlation"), -1 + 1e-7, 1 - 1e-7))
     frame = frame.groupby(["method", "rank"], as_index=False)["fisher_z"].mean()
     frame["correlation"] = np.tanh(frame.pop("fisher_z"))
-    return frame
+    ev_frame = pd.DataFrame(ev_records, columns=["method", "rank", "explained_variance"])
+    return frame, ev_frame
 
 
 def _significance_one(results_root, dataset, model, layer):
@@ -442,41 +510,106 @@ def load_electrode_curves(results_root, dataset, model, layer, lag_summary="mean
     return pd.concat(frames, ignore_index=True)
 
 
-def load_final_data(results_root, lag_summary="mean"):
+def load_shuffled_internal_data(results_root, lag_summary="mean", fmri_noise_normalized=True):
+    """Explained-variance internal RRR inputs from the shuffled-embedding null control.
+
+    Reads `results/run_rrr_shuffled/` (internal mode only) and returns
+    (`ExplainedVarianceData`, gaps). Only `internal`, `curves` and `full_rows` are populated
+    (LOSO and cross tables are empty), matching what `rrr_aggregate(mode="internal",
+    saturation_mode="explained_variance")` reads. Not cached.
+    """
+    results_root = Path(results_root)
+    ev_rows, ev_curves, ev_full_rows, gaps = [], {}, [], []
+    for dataset in DATASETS:
+        for model, layer in PAIRS:
+            identity = (dataset, model, layer)
+            try:
+                _, _, internal_ev, _, full_ev, _ = _internal_one(
+                    results_root, *identity, lag_summary, fmri_noise_normalized,
+                    shuffled_embeddings=True)
+            except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError) as error:
+                gaps.append(f"shuffled internal {identity}: {error}")
+                continue
+            ev_curves.update({(*identity, method): (ranks, curve[:, None])
+                              for method, (ranks, curve) in internal_ev.items()})
+            ev_rows.extend((dataset, model, layer, method, int(rank), float(value))
+                           for method, (ranks, curve) in internal_ev.items()
+                           for rank, value in zip(ranks, curve))
+            if np.isfinite(full_ev):
+                ev_full_rows.append((*identity, full_ev))
+    empty = lambda columns: pd.DataFrame(columns=columns)
+    data = ExplainedVarianceData(
+        internal=pd.DataFrame(ev_rows, columns=[
+            "dataset", "model", "layer", "method", "rank", "explained_variance"]),
+        loso=empty(["dataset", "model", "layer", "subject", "method", "rank", "explained_variance"]),
+        cross=empty(["method", "rank", "explained_variance", "target_dataset",
+                     "source_dataset", "model", "layer"]),
+        curves=ev_curves, loso_curves={}, full_rows=ev_full_rows,
+    )
+    return data, gaps
+
+
+def load_final_data(results_root, lag_summary="mean", fmri_noise_normalized=True):
     """Eagerly load all requested figures' inputs and return separate plain values.
 
-    `lag_summary` chooses how iEEG (electrode, lag) targets become electrode values:
-    "mean" averages across lags, "peak" takes each electrode's best lag. fMRI and
-    decoding results are unaffected.
+    Returns (internal, loso, cross, quantiles, loso_quantiles, full_rows,
+    significant, decoding, gaps, explained_variance). All rank results are read
+    through `Artifact.load_rank_matrix`; the first nine values are the quantile-mode
+    inputs and `explained_variance` (an `ExplainedVarianceData`) holds the
+    explained-variance mode's.
+
+    `lag_summary` chooses how iEEG (electrode, lag) targets become electrode values
+    in the quantile-mode inputs: "mean" averages across lags, "peak" takes each
+    electrode's best lag. Explained variance always uses every (electrode, lag)
+    pair. fMRI and decoding results are unaffected.
+
+    fMRI explained variance is the fraction of explainable variance, r^2 / CC_max^2 per
+    voxel, unless `fmri_noise_normalized=False` (raw r^2, for the appendix); the cache is
+    kept separately for each setting. Correlation-mode inputs are never normalized.
     """
     if lag_summary not in LAG_SUMMARIES:
         raise ValueError(f"lag_summary must be one of {LAG_SUMMARIES}, got {lag_summary!r}")
     results_root = Path(results_root)
-    suffix = "" if lag_summary == "mean" else f"_{lag_summary}"
+    suffix = ("" if lag_summary == "mean" else f"_{lag_summary}")
+    suffix += "" if fmri_noise_normalized else "_raw_fmri"
     cache_path = results_root / f".final_plots_cache{suffix}.pkl"
-    fingerprint = _cache_fingerprint(results_root, lag_summary)
+    fingerprint = _cache_fingerprint(results_root, lag_summary + suffix)
     cached = _read_cache(cache_path, fingerprint)
     if cached is not None:
         return cached
     internal_rows, loso_rows, cross_rows, full_rows = [], [], [], []
+    ev_internal_rows, ev_loso_rows, ev_cross_rows, ev_full_rows = [], [], [], []
     quantiles, loso_quantiles, significant, gaps = {}, {}, {}, []
+    ev_curves, ev_loso_curves = {}, {}
     for dataset in DATASETS:
         for model, layer in PAIRS:
             identity = (dataset, model, layer)
-            subject_curves, subject_quantiles = [], {}
+            subject_curves, subject_quantiles, subject_ev = [], {}, {}
+            curves, internal_ev = [], {}
             try:
-                curves, matrices, full, subject_curves, subject_quantiles = _internal_one(
-                    results_root, *identity, lag_summary
+                (curves, matrices, internal_ev, full, full_ev,
+                 (subject_curves, subject_quantiles, subject_ev)) = _internal_one(
+                    results_root, *identity, lag_summary, fmri_noise_normalized
                 )
                 quantiles.update({(*identity, method): value for method, value in matrices.items()})
                 internal_rows.extend((dataset, model, layer, *row) for row in curves)
+                ev_curves.update({(*identity, method): (ranks, curve[:, None])
+                                  for method, (ranks, curve) in internal_ev.items()})
+                ev_internal_rows.extend(
+                    (dataset, model, layer, method, int(rank), float(value))
+                    for method, (ranks, curve) in internal_ev.items()
+                    for rank, value in zip(ranks, curve)
+                )
                 if full.size:
                     full_rows.append((dataset, model, layer, full))
+                if np.isfinite(full_ev):
+                    ev_full_rows.append((dataset, model, layer, full_ev))
             except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError) as error:
                 gaps.append(f"internal {identity}: {error}")
-                curves = []
+                curves, internal_ev = [], {}
             try:
-                values, matrices = _loso_one(results_root, *identity, lag_summary)
+                values, matrices, loso_ev = _loso_one(results_root, *identity, lag_summary,
+                                                  fmri_noise_normalized)
                 transfer_subjects = {subject for subject, method, _, _ in values
                                      if method == "RRR transfer"}
                 pca_subjects = {subject for subject, method, _, _ in values
@@ -489,8 +622,19 @@ def load_final_data(results_root, lag_summary="mean"):
                             if key[0] in matched_subjects}
                 matrices.update({key: value for key, value in subject_quantiles.items()
                                  if key[0] in matched_subjects})
+                loso_ev = {key: value for key, value in loso_ev.items()
+                           if key[0] in matched_subjects}
+                loso_ev.update({key: value for key, value in subject_ev.items()
+                                if key[0] in matched_subjects})
                 loso_quantiles.update({(*identity, *key): value for key, value in matrices.items()})
                 loso_rows.extend((dataset, model, layer, *row) for row in values)
+                ev_loso_curves.update({(*identity, *key): (ranks, curve[:, None])
+                                       for key, (ranks, curve) in loso_ev.items()})
+                ev_loso_rows.extend(
+                    (dataset, model, layer, subject, method, int(rank), float(value))
+                    for (subject, method), (ranks, curve) in loso_ev.items()
+                    for rank, value in zip(ranks, curve)
+                )
             except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError) as error:
                 gaps.append(f"LOSO {identity}: {error}")
             try:
@@ -501,10 +645,15 @@ def load_final_data(results_root, lag_summary="mean"):
                 if source == dataset:
                     continue
                 try:
-                    frame = _cross_one(results_root, dataset, source, model, layer, curves, lag_summary)
-                    frame["target_dataset"], frame["source_dataset"] = dataset, source
-                    frame["model"], frame["layer"] = model, layer
+                    frame, ev_frame = _cross_one(
+                        results_root, dataset, source, model, layer, curves, internal_ev,
+                        lag_summary, fmri_noise_normalized,
+                    )
+                    for table in (frame, ev_frame):
+                        table["target_dataset"], table["source_dataset"] = dataset, source
+                        table["model"], table["layer"] = model, layer
                     cross_rows.append(frame)
+                    ev_cross_rows.append(ev_frame)
                 except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError) as error:
                     gaps.append(f"directed {source} → {dataset} {model}/layer-{layer}: {error}")
     internal = pd.DataFrame(internal_rows, columns=["dataset", "model", "layer", "method", "rank", "correlation"])
@@ -512,8 +661,18 @@ def load_final_data(results_root, lag_summary="mean"):
     cross = pd.concat(cross_rows, ignore_index=True) if cross_rows else pd.DataFrame(
         columns=["method", "rank", "correlation", "target_dataset", "source_dataset", "model", "layer"]
     )
+    explained_variance = ExplainedVarianceData(
+        internal=pd.DataFrame(ev_internal_rows, columns=[
+            "dataset", "model", "layer", "method", "rank", "explained_variance"]),
+        loso=pd.DataFrame(ev_loso_rows, columns=[
+            "dataset", "model", "layer", "subject", "method", "rank", "explained_variance"]),
+        cross=pd.concat(ev_cross_rows, ignore_index=True) if ev_cross_rows else pd.DataFrame(
+            columns=["method", "rank", "explained_variance", "target_dataset",
+                     "source_dataset", "model", "layer"]),
+        curves=ev_curves, loso_curves=ev_loso_curves, full_rows=ev_full_rows,
+    )
     decoding = _decoding_summaries(results_root)
     result = (internal, loso, cross, quantiles, loso_quantiles, full_rows,
-              significant, decoding, gaps)
+              significant, decoding, gaps, explained_variance)
     _write_cache(cache_path, fingerprint, result)
     return result

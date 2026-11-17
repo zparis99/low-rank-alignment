@@ -32,6 +32,7 @@ dependencies = [
     "altair>=6.2.2",
     "ipython>=9.16.1",
     "librosa>=1.0.0",
+    "pycortex>=1.4.0",
 ]
 
 [[tool.uv.index]]

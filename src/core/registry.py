@@ -942,10 +942,10 @@ class BrainTreebankDatasetAdapter:
         return coords
 
     def get_target_atlas_labels(self, targets: pd.DataFrame, data_root: str) -> np.ndarray:
-        raise NotImplementedError(
-            "Brain Treebank region labelling is undecided: the localization file's "
-            "Region column or labels from MNI coordinates"
-        )
+        """Destrieux label per electrode from its localization-file MNI `x`, `y`, `z`."""
+        from src.utils.atlas.core import label_coordinates_with_volume_atlas
+
+        return label_coordinates_with_volume_atlas(targets[["x", "y", "z"]].to_numpy())
 
     def _attach_electrode_coordinates(self, raw, subject_id: int, data_root: str):
         """Attach available Brain Treebank MNI coordinates to an MNE Raw."""

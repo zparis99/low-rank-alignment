@@ -187,3 +187,78 @@ def test_quantile_robustness_ignores_negative_peaks_and_outer_quantiles():
     plt.close(figure)
     negative = {('podcast', 'gpt2', 0, 'rrr'): ([1, 4, 10], -np.ones((3, 6)))}
     assert not _quantile_robustness_values(negative, 'podcast')
+
+
+def test_explained_variance_curve_clips_negatives_and_averages_over_targets():
+    from src.utils.rrr.plot_metrics import explained_variance_curve
+
+    # Rank 1: r = (.1, -.5, nan) -> squares (.01, 0), mean .005. Rank 2: (.3, .1, .2).
+    values = np.array([[.1, -.5, np.nan], [.3, .1, .2]])
+    assert explained_variance_curve(values) == pytest.approx([.005, (.09 + .01 + .04) / 3])
+    # Higher-dimensional target axes (electrode x lag) are flattened together.
+    stacked = np.stack([values, values], axis=-1)
+    assert explained_variance_curve(stacked) == pytest.approx(explained_variance_curve(values))
+    assert np.isnan(explained_variance_curve(np.full((1, 2), np.nan))[0])
+
+
+def test_explained_variance_saturation_is_scale_free_and_has_no_peak_floor():
+    from src.utils.rrr.plot_metrics import explained_variance_saturation_rank
+
+    ranks, curve = [1, 4, 8], np.array([.0001, .0004, .0003])
+    # The monotonic envelope peaks at rank 4; 99% of that is reached at 3.97 ... of the way.
+    expected = 1 + (.99 * .0004 - .0001) / (.0004 - .0001) * 3
+    assert explained_variance_saturation_rank(ranks, curve) == pytest.approx(expected)
+    # Tiny absolute values are not dropped by the quantile statistic's 0.005 cutoff,
+    # and rescaling (sum instead of mean over targets) leaves the rank unchanged.
+    assert explained_variance_saturation_rank(ranks, curve * 1000) == pytest.approx(expected)
+    assert np.isnan(explained_variance_saturation_rank(ranks, [0, 0, 0]))
+    assert explained_variance_saturation_rank([1, 4], [.2, .2]) == pytest.approx(1)
+
+
+def test_explained_variance_figures_use_explained_variance_tables():
+    import matplotlib.pyplot as plt
+    from src.utils.plotting.final_figures import (
+        cross_aggregate, cross_gap_scatter, rrr_aggregate, sensitivity_grid,
+    )
+
+    ranks = np.array([1, 4, 9])
+    curves = {('podcast', 'gpt2', 0, method): (ranks, np.array([[.001], [.004], [.005]]))
+              for method in ('rrr', 'pca')}
+    loso_curves = {('podcast', 'gpt2', 0, subject, method): (ranks, np.array([[.001], [.004], [.005]]))
+                   for subject in ('a', 'b')
+                   for method in ('RRR baseline', 'RRR transfer', 'PCA baseline')}
+    internal = pd.DataFrame([
+        ('podcast', 'gpt2', 0, method, int(rank), float(value))
+        for method in ('rrr', 'pca') for rank, value in zip(ranks, [.001, .004, .005])
+    ], columns=['dataset', 'model', 'layer', 'method', 'rank', 'explained_variance'])
+    loso = pd.DataFrame([
+        ('podcast', 'gpt2', 0, subject, method, int(rank), float(value))
+        for subject in ('a', 'b')
+        for method in ('RRR baseline', 'RRR transfer', 'PCA baseline')
+        for rank, value in zip(ranks, [.001, .004, .005])
+    ], columns=['dataset', 'model', 'layer', 'subject', 'method', 'rank', 'explained_variance'])
+    full_rows = [('podcast', 'gpt2', 0, .006)]
+    for mode, frame in (('internal', internal), ('loso', loso)):
+        figure = rrr_aggregate(internal, loso, curves, loso_curves, full_rows, ('gpt2', 0),
+                               mode=mode, saturation_mode='explained_variance')
+        assert 'Mean $r^2$\nper target' in {ax.get_ylabel() for ax in figure.axes}
+        # The 0.005 quantile peak floor must not remove these small explained-variance peaks.
+        assert any('mean = ' in text.get_text() for ax in figure.axes for text in ax.texts)
+        plt.close(figure)
+    cross = pd.DataFrame([
+        (method, int(rank), float(value), 'podcast', 'cars-2', 'gpt2', 0)
+        for method in ('Within RRR', 'Within PCA', 'Transfer RRR', 'Transfer PCA')
+        for rank, value in zip(ranks, [.001, .004, .005])
+    ], columns=['method', 'rank', 'explained_variance', 'target_dataset', 'source_dataset',
+                'model', 'layer'])
+    for figure in (cross_aggregate(cross, 'explained_variance'),
+                   cross_gap_scatter(cross, 'explained_variance'),
+                   sensitivity_grid(curves, (.5, .99), saturation_mode='explained_variance'),
+                   sensitivity_grid(loso_curves, (.5, .99), mode='loso',
+                                    saturation_mode='explained_variance')):
+        plt.close(figure)
+    with pytest.raises(ValueError):
+        sensitivity_grid(curves, (0, .005), variable='floor', saturation_mode='explained_variance')
+    with pytest.raises(ValueError):
+        rrr_aggregate(internal, loso, curves, loso_curves, full_rows, ('gpt2', 0),
+                      saturation_mode='nonsense')

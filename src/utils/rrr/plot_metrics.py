@@ -140,6 +140,45 @@ def quantile_saturation_rank(ranks, quantiles, fraction=0.99, min_peak=PEAK_FLOO
     return max(crossings) if crossings else np.nan
 
 
+def explained_variance_curve(correlations, axis=0, scale=None):
+    """Mean squared correlation per rank from per-target correlations.
+
+    `correlations` has ranks on the first axis and any number of target axes after
+    it, already averaged across evaluation folds (Fisher space). Negative
+    correlations are clipped to zero before squaring; non-finite targets are
+    ignored. Returns one value per rank: the average variance explained (r^2) per
+    target, which is the summed r^2 divided by the number of targets. Summing
+    instead would not move the saturation rank.
+
+    `scale` optionally divides every target's r^2 (for example by its squared noise ceiling,
+    giving the fraction of explainable variance). It broadcasts against the target axes
+    (`correlations.shape[1:]`); targets whose scale is not a positive finite number are ignored.
+    """
+    values = np.asarray(correlations, dtype=float)
+    squared = np.maximum(values, 0) ** 2
+    if scale is not None:
+        scale = np.asarray(scale, dtype=float)
+        squared = squared / np.where(scale > 0, scale, np.nan)
+        values = np.where(np.isfinite(squared), values, np.nan)
+    squared = np.where(np.isfinite(values), squared, np.nan)
+    flat = squared.reshape(values.shape[0], -1)
+    with np.errstate(all="ignore"):
+        counts = np.isfinite(flat).sum(axis=1)
+        return np.where(counts > 0, np.nansum(flat, axis=1) / np.maximum(counts, 1), np.nan)
+
+
+def explained_variance_saturation_rank(ranks, curve, fraction=0.99):
+    """First interpolated rank at which the explained-variance curve reaches
+    `fraction` of its own maximum, treating the curve as monotonic.
+
+    Uses the same monotonic envelope and interpolation as the quantile statistic,
+    with no minimum-peak cutoff (explained variance is small by nature). Curves
+    whose maximum is not positive give NaN.
+    """
+    curve = np.asarray(curve, dtype=float).reshape(-1, 1)
+    return quantile_saturation_rank(ranks, curve, fraction, min_peak=0.0)
+
+
 def average_normalized_quantiles(curves, grid=None, min_peak=PEAK_FLOOR):
     """Average eligible quantiles equally across model layers on relative rank."""
     if grid is None:
@@ -163,13 +202,29 @@ def average_normalized_quantiles(curves, grid=None, min_peak=PEAK_FLOOR):
     return grid, result, counts
 
 
+EXACT_SIGN_FLIP_MAX_N = 14
+
+
 def paired_sign_flip(first, second, *, alternative="less", permutations=10_000, seed=0):
-    """One-sided paired sign-flip p-value with the notebook's fixed seed."""
+    """One-sided paired sign-flip p-value.
+
+    With at most `EXACT_SIGN_FLIP_MAX_N` pairs every one of the 2^n sign patterns is enumerated
+    (an exact test whose smallest p-value is 1/2^n); with more pairs, `permutations` random sign
+    patterns are drawn with the notebook's fixed seed.
+    """
     difference = np.asarray(first, dtype=float) - np.asarray(second, dtype=float)
     difference = difference[np.isfinite(difference)]
     if not len(difference):
         return np.nan
     observed = float(np.mean(difference))
+    n = len(difference)
+    if n <= EXACT_SIGN_FLIP_MAX_N:
+        signs = 1.0 - 2.0 * ((np.arange(2 ** n)[:, None] >> np.arange(n)) & 1)
+        shuffled = (signs * difference).mean(axis=1)
+        tolerance = 1e-12 * max(1.0, abs(observed))
+        exceed = np.count_nonzero(shuffled <= observed + tolerance if alternative == "less"
+                                  else shuffled >= observed - tolerance)
+        return exceed / 2 ** n
     rng = np.random.default_rng(seed)
     shuffled = np.asarray([
         np.mean(difference * rng.choice((-1.0, 1.0), size=len(difference)))
@@ -178,3 +233,30 @@ def paired_sign_flip(first, second, *, alternative="less", permutations=10_000, 
     exceed = np.count_nonzero(shuffled <= observed if alternative == "less"
                               else shuffled >= observed)
     return (exceed + 1) / (permutations + 1)
+
+
+def mean_by_model(values, models):
+    """Average `values` within each model: layers of one model are not independent.
+
+    Returns `(model names sorted, per-model means)`; non-finite values are ignored.
+    """
+    values = np.asarray(values, dtype=float)
+    models = np.asarray(models, dtype=object)
+    names = sorted({str(model) for model, value in zip(models, values) if np.isfinite(value)})
+    means = [float(np.mean([value for model, value in zip(models, values)
+                            if str(model) == name and np.isfinite(value)]))
+             for name in names]
+    return names, np.asarray(means)
+
+
+def model_sign_flip(first, second, models, *, alternative="less"):
+    """Paired sign-flip test with one unit per model (layer values are averaged first).
+
+    `first`, `second` and `models` are parallel over (model, layer) entries. Returns NaN with
+    fewer than two models, since no sign pattern other than the observed one is informative.
+    """
+    names, first_means = mean_by_model(first, models)
+    _, second_means = mean_by_model(second, models)
+    if len(names) < 2:
+        return np.nan
+    return paired_sign_flip(first_means, second_means, alternative=alternative)

@@ -108,3 +108,21 @@ saturation is calculated separately for each subject and then averaged within
 a model layer, whereas convergence curves aggregate subjects before normalization.
 Sensitivity figures vary the threshold or peak cutoff, and the interactive
 notebook allows selection of the saturation percentage.
+
+## Explained-variance saturation (main figures)
+
+The main figures measure saturation from the total variance explained rather than
+from target quantiles. For each model layer and method, the per-target correlations
+are averaged over evaluation folds in Fisher-z space, negative values are clipped to
+zero, and the result is squared. The curve is the mean of these squared correlations
+over all targets (all electrode-lag pairs for iEEG, all voxels for fMRI), one value
+per tested rank. Dividing by the number of targets does not move the saturation
+rank, which is the same as for the summed squared correlations: the first rank,
+linearly interpolated, at which the monotonic curve reaches 99% of its own maximum
+over tested ranks. In words: the rank at which the representation has captured 99% of
+all the variance it ever explains. There is no minimum-peak cutoff. The same
+normalization (monotonic envelope, peak scaling, relative rank, log-rank AUC)
+applies to these curves in the aggregate and directed cross-dataset figures. Squared
+correlation is not 1 - SSE/SST: it ignores scale and offset error. Because squaring
+weights well-predicted targets more, this statistic is dominated by high-signal
+targets; the quantile version above checks lower-signal targets.
