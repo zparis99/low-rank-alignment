@@ -25,7 +25,11 @@ def _():
     )
 
     results_root = repo_root / "results"
+    # Extra results roots whose language-decoding summaries are overlaid on the main ones.
+    # Empty by default; opt in with e.g. [repo_root / "results_volume"].
+    extra_decoding_roots = []
     return (
+        extra_decoding_roots,
         average_quantile_grid,
         cross_aggregate,
         cross_gap_scatter,
@@ -45,10 +49,11 @@ def _():
 
 
 @app.cell
-def _(load_final_data, results_root):
+def _(extra_decoding_roots, load_final_data, results_root):
     # The only large artifact read in this notebook. Restart to refresh results.
     (internal, loso, cross, quantiles, loso_quantiles, full_rows,
-     significant, decoding, gaps, explained_variance) = load_final_data(results_root)
+     significant, decoding, gaps, explained_variance) = load_final_data(
+        results_root, extra_decoding_roots=extra_decoding_roots)
     return (
         cross,
         decoding,

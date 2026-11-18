@@ -193,6 +193,10 @@ HDF5 container while keeping plots as separately browsable PNG files.
   host (LOSO aggregates and sensitivity, the LOSO subspace figures, the word-embedding PCA figures, language decoding and the shuffled
   control; `REMOTE_ONLY` in `final_export.py`, per main/quantile/raw_fmri set). Filenames match, so the two
   output folders can be merged; `significant_targets.tex` comes with `local`, `result_gaps.txt` with both.
+  `--extra-decoding-root <results_root> ...` overlays the `run_language_decoding` summaries of extra results
+  roots (e.g. `results_volume/`, a volume-only decoding run made with `--results_root=results_volume`) onto
+  the main ones before the decoding figures; matching rows are replaced (`overlay_decoding_summaries` in
+  `final_data.py`). Off by default; the notebook's `extra_decoding_roots` list (empty by default) is the equivalent opt-in.
   `--example-model gpt2 --example-layer 6` selects the sample curves in both
   RRR aggregates and the target-quantile figure (default: GPT-J 6B layer 21);
   `--loso-example-model` and `--loso-example-layer` override the LOSO example.

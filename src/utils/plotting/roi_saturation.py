@@ -7,7 +7,7 @@ import numpy as np
 
 from src.utils.atlas.core import bihemispheric_region_groups
 from src.utils.plotting.final_axes import (
-    add_bracket_headroom, finish_axis, normalized_curve_axis, paper_style, with_model_legend,
+    add_bracket_headroom, legend_anchor_y, thin_log2_rank_ticks, finish_axis, normalized_curve_axis, paper_style, with_model_legend,
 )
 from src.utils.plotting.final_data import DATASETS, LABELS, PAIRS, load_pair_products
 from src.utils.plotting.final_figures import (
@@ -72,7 +72,7 @@ def _panel_title(dataset, count):
 def _grid(regions, title, datasets=tuple(DATASETS)):
     figure, axes = plt.subplots(len(regions), len(datasets),
                                 figsize=(4.6 * len(datasets), 3.1 * len(regions)),
-                                squeeze=False)
+                                sharey=True, squeeze=False)  # one y scale to compare all panels
     figure.suptitle(title)
     return figure, axes
 
@@ -94,17 +94,18 @@ def roi_normalized_curves(curves, counts, regions, datasets=tuple(DATASETS)):
                 else:
                     normalized_curve_axis(
                         ax, {m: [(r, c[:, 0]) for r, c in v] for m, v in members.items()})
+                ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])  # 0.1% crowds the 0 tick
                 ax.set_title(_panel_title(dataset, counts.get((dataset, region), 0)), fontsize=14)
-                if column == 0:
-                    ax.set_ylabel(f"{region}\nNormalized performance")
-                else:
-                    ax.set_ylabel("")
+                ax.set_ylabel(region if column == 0 else "")
                 if row != len(regions) - 1:
                     ax.set_xlabel("")
         handles, labels = next((a.get_legend_handles_labels() for a in axes.flat
                                 if a.get_legend_handles_labels()[0]), ([], []))
-        figure.legend(handles, labels, frameon=False, loc="upper right", ncol=2)
+        figure.supylabel("Normalized performance", fontsize=17)
         figure.tight_layout(rect=(0, 0, 1, .97))
+        figure.legend(handles, labels, frameon=False, fontsize=13, ncol=len(handles),
+                      loc="upper center", bbox_to_anchor=(.5, legend_anchor_y(figure)), handlelength=1.6,
+                      columnspacing=1.0, handletextpad=.4, borderaxespad=0)
         return figure
 
 
@@ -139,13 +140,14 @@ def roi_saturation_distributions(curves, regions, counts=None, *, fraction=.99,
                     ax, ranks, list(METHODS), ["RRR", "PCA"], [("RRR", "PCA")],
                     show_mean_value=separate_model is None, separate_model=separate_model,
                     intervals=panel_intervals)
-                if separate_model is not None:
-                    add_bracket_headroom(ax, 1)
                 ax.set_title(LABELS[dataset] if counts is None else
                              _panel_title(dataset, counts.get((dataset, region), 0)), fontsize=14)
                 if column == 0:
                     ax.set_ylabel(f"{region}\nSaturation rank")
                 else:
                     ax.set_ylabel("")
+        if separate_model is not None:
+            add_bracket_headroom(axes[0, 0], 1)  # once: the y axes are shared
+        thin_log2_rank_ticks(axes[0, 0])  # short shared panels: avoid overlapping tick labels
         figure.tight_layout(rect=(0, 0, 1, .97))
         return figure

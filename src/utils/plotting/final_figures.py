@@ -15,7 +15,7 @@ from src.utils.plotting.final_axes import (
     format_p_value,
     normalized_curve_axis, pairwise_test_brackets, paper_style, quantile_axis, rank_curve_axis,
     add_bracket_headroom, separate_color, separate_group_captions, separate_label,
-    target_bar_axis, with_model_legend,
+    target_bar_axis, thin_log2_rank_ticks, with_model_legend, legend_anchor_y,
 )
 from src.utils.plotting.final_data import DATASETS, LABELS, QUANTILES
 from scripts.utilities.check_final_significance import MODEL_LAYERS
@@ -255,7 +255,7 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
             "RRR baseline", "RRR transfer", "PCA baseline"]
         average = fisher_mean if saturation_mode == "quantile" else np.nanmean
         baseline_map = {(d, m, l): float(average(v)) for d, m, l, v in full_rows}
-        first_saturation_ax = None
+        first_saturation_ax = first_sample_ax = first_mean_ax = None
         for row, dataset in enumerate(datasets):
             frame = source[source["dataset"] == dataset]
             sample = _pair_rows(frame, *selected_pair)
@@ -281,23 +281,19 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                         markers[method] = float(np.mean(finite))
             if not distributions_only:
                 sample_ax = figure.add_subplot(grid[row, 0])
+                first_sample_ax = first_sample_ax or sample_ax
                 rank_curve_axis(sample_ax, sample_curves, saturation=markers,
                                 baseline=baseline_map.get((dataset, *selected_pair)),
                                 ylabel=settings["ylabel"])
                 sample_ax.set_title(LABELS[dataset], fontsize=15)
-                if row == 0:
-                    sample_ax.legend(frameon=False, ncol=2, fontsize=11,
-                                     handlelength=1.2, columnspacing=.7)
                 if row != count - 1:
                     sample_ax.set_xlabel("")
                 if row != count // 2:
                     sample_ax.set_ylabel("")
                 mean_ax = figure.add_subplot(grid[row, 1])
+                first_mean_ax = first_mean_ax or mean_ax
                 normalized_curve_axis(mean_ax, _members(frame, saturation_mode))
                 mean_ax.set_title(LABELS[dataset])
-                if row == 0:
-                    mean_ax.legend(frameon=False, ncol=2, fontsize=11,
-                                   handlelength=1.2, columnspacing=.7)
                 mean_ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])
                 if row != count - 1:
                     mean_ax.set_xlabel("")
@@ -339,14 +335,22 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                      else "Maximum Explained Variance")
         title = f"Saturation Distributions ({fraction * 100:g}% {peak_text})"
         if distributions_only:
-            figure.suptitle(title, fontsize=18)
-            figure.tight_layout(rect=(0, 0, 1, .94))
+            figure.suptitle(title, fontsize=18, y=.995)
+            figure.tight_layout(rect=(0, 0, 1, .975))
             return figure
         # The explained-variance y label is two lines and needs a wider left margin.
         figure.subplots_adjust(left=.055 if saturation_mode == "quantile" else .075,
                                right=.985, top=.89, bottom=.10)
         sample_box = sample_ax.get_position()
         mean_box = mean_ax.get_position()
+        # One legend for panels A and B below them, so it never covers a curve.
+        entries = {}
+        for legend_ax in (first_sample_ax, first_mean_ax):
+            entries.update(zip(*reversed(legend_ax.get_legend_handles_labels())))
+        figure.legend(list(entries.values()), list(entries), frameon=False, fontsize=13,
+                      ncol=len(entries), loc="upper center",
+                      bbox_to_anchor=((sample_box.x0 + mean_box.x1) / 2, legend_anchor_y(figure)),
+                      handlelength=1.6, columnspacing=1.0, handletextpad=.4, borderaxespad=0)
         saturation_start = first_saturation_ax.get_position()
         saturation_end = distribution_ax.get_position()
         figure.text((sample_box.x0 + sample_box.x1) / 2, .965,
@@ -430,8 +434,7 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
                 ax.tick_params(axis="both", labelsize=14)
                 ax.tick_params(axis="x", labelbottom=index % 2 == 1)
                 if index == 0:
-                    ax.legend(frameon=False, fontsize=10, ncol=2,
-                              handlelength=1.2, columnspacing=.7)
+                    first_curve_ax = ax
             label = f"{LABELS[source].split(' (')[0]} → {LABELS[target].split(' (')[0]}"
             directions[label] = (target, source)
             for (model, _), values in _cross_auc(panel, saturation_mode).items():
@@ -472,7 +475,6 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
                     ax.set_xticklabels([text.get_text().removesuffix(separate_label(""))
                                         for text in ax.get_xticklabels()])
                 plt.setp(ax.get_xticklabels(), rotation=28, ha="right", fontsize=14)
-                ax.set_xlabel("Directed source → target comparison", fontsize=14)
             for position, (group, values) in enumerate(output.items(), start=1):
                 if values:
                     p = model_sign_flip(values, np.zeros(len(values)), point_models[group],
@@ -487,11 +489,11 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
             if separate_groups[row]:
                 add_bracket_headroom(ax, 1, extra=.18)
         if distributions_only:
-            figure.suptitle("Normalized AUC Differences", fontsize=18)
-            figure.tight_layout(rect=(0, 0, 1, .96))
+            figure.suptitle("Normalized AUC Differences", fontsize=18, y=.995)
+            figure.tight_layout(rect=(0, 0, 1, .975))
             return figure
         figure.subplots_adjust(left=.05, right=.995, top=.875, bottom=.17,
-                               hspace=.45, wspace=.42)
+                               hspace=.45, wspace=.55)
         left_start, left_end = (grid[0, column].get_position(figure) for column in (0, 2))
         right_start, right_end = (grid[0, column].get_position(figure) for column in (3, 5))
         figure.text((left_start.x0 + left_end.x1) / 2, .985,
@@ -500,15 +502,22 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
         figure.text((right_start.x0 + right_end.x1) / 2, .985,
                     "B. Normalized AUC Differences", ha="center", va="top",
                     fontsize=16, weight="bold")
-        figure.text((left_start.x0 + left_end.x1) / 2, .085,
-                    "Relative rank", ha="center", fontsize=14)
+        rank_label = figure.text((left_start.x0 + left_end.x1) / 2, .10,
+                                 "Relative rank", ha="center", fontsize=14)
+        # Curve legend under the A plots (not over the curves), level with the model legend.
+        handles, labels = first_curve_ax.get_legend_handles_labels()
+        figure.legend(handles, labels, frameon=False, fontsize=13, ncol=len(handles),
+                      loc="upper center",
+                      bbox_to_anchor=((left_start.x0 + left_end.x1) / 2, rank_label.get_window_extent(
+                          figure.canvas.get_renderer()).transformed(figure.transFigure.inverted()).y0 - .012),
+                      handlelength=1.6, columnspacing=1.0, handletextpad=.4, borderaxespad=0)
         return figure
 
 
 def cross_gap_scatter(cross, saturation_mode="quantile"):
     """Correlate matched internal-minus-transfer PCA and RRR AUC gaps."""
     with paper_style():
-        figure, ax = plt.subplots(figsize=(10.5, 7))
+        figure, ax = plt.subplots(figsize=(8.5, 9))
         all_points = []
         colors = plt.get_cmap("tab10").colors
         for index, (target, source) in enumerate(
@@ -547,13 +556,14 @@ def cross_gap_scatter(cross, saturation_mode="quantile"):
                 r, p_text = np.nan, "p=NA"
             ax.set(xlim=limits, ylim=limits)
             ax.set_title(f"Internal − transfer AUC gaps\nPearson r = {r:.2f}, {p_text}, n = {len(points)}")
-            ax.legend(frameon=False, loc="center left", bbox_to_anchor=(1.02, .5))
+            ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(.5, -.16), ncol=2,
+                      columnspacing=1.0, handletextpad=.4)
         ax.axhline(0, color="#64748b", linewidth=.8)
         ax.axvline(0, color="#64748b", linewidth=.8)
         ax.set_xlabel("Within PCA − transfer PCA normalized AUC")
         ax.set_ylabel("Within RRR − transfer RRR normalized AUC")
         finish_axis(ax)
-        figure.subplots_adjust(left=.13, right=.72, top=.88, bottom=.14)
+        figure.subplots_adjust(left=.14, right=.97, top=.90, bottom=.27)
         return figure
 
 
@@ -591,7 +601,7 @@ def model_order(full_rows):
 def _model_grid_style(ax, positions, labels, centers):
     ax.set_xticks(positions, labels, rotation=45, ha="right")
     for model, center in centers.items():
-        ax.text(center, -.23, MODEL_NAMES.get(model, model), transform=ax.get_xaxis_transform(),
+        ax.text(center, -.30, MODEL_NAMES.get(model, model), transform=ax.get_xaxis_transform(),
                 ha="center", va="top", fontsize=14)
     finish_axis(ax)
 
@@ -609,8 +619,8 @@ def encoding_grid(full_rows, order):
             _model_grid_style(ax, positions, labels, centers)
             ax.set_ylabel("Mean correlation ± SD")
             ax.set_title(LABELS[dataset])
-        figure.suptitle("Full encoding-model performance")
-        figure.subplots_adjust(left=.06, right=.99, top=.93, bottom=.18, hspace=.55)
+        figure.suptitle("Full encoding-model performance", y=.995)
+        figure.subplots_adjust(left=.06, right=.99, top=.925, bottom=.12, hspace=.75)
         return figure
 
 
@@ -632,8 +642,9 @@ def significance_grid(significant, order):
             ax.bar(positions, values, color=colors, width=.8)
             _model_grid_style(ax, positions, labels, centers)
             ax.set(ylabel="Significant targets", title=LABELS[dataset])
-        figure.suptitle("Significant electrodes or voxels by model layer")
-        figure.subplots_adjust(left=.06, right=.99, top=.93, bottom=.18, hspace=.55)
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:,.0f}"))
+        figure.suptitle("Significant electrodes or voxels by model layer", y=.995)
+        figure.subplots_adjust(left=.06, right=.99, top=.925, bottom=.12, hspace=.75)
         return figure
 
 
@@ -685,15 +696,17 @@ def quantile_grid(quantiles, selected_pair, *, fraction=.99):
                 ax.set_title(f"{LABELS[dataset]} · {method.upper()}")
         handles, labels = axes[0, 0].get_legend_handles_labels()
         figure.legend(handles, labels, title="Target quantile", frameon=False,
-                      loc="upper center", bbox_to_anchor=(.5, .945), ncol=len(labels))
-        figure.suptitle(f"Target correlation quantiles · {selected_pair[0]} / {selected_pair[1]}")
-        figure.tight_layout(rect=(0, 0, 1, .89))
+                      loc="upper center", bbox_to_anchor=(.5, .935), ncol=len(labels))
+        layer_text = "no layer" if selected_pair[1] is None else f"layer {selected_pair[1]}"
+        figure.suptitle(f"Target correlation quantiles · "
+                        f"{MODEL_NAMES.get(selected_pair[0], selected_pair[0])}, {layer_text}", y=.995)
+        figure.tight_layout(rect=(0, 0, 1, .875))
         return figure
 
 
 def average_quantile_grid(quantiles):
     with paper_style():
-        figure, axes = plt.subplots(3, 2, figsize=(13, 10.5))
+        figure, axes = plt.subplots(3, 2, figsize=(13, 10.5), sharex=True, sharey=True)
         palette = plt.get_cmap("viridis")(np.linspace(.08, .92, len(QUANTILES)))
         for row, dataset in enumerate(DATASETS):
             for col, method in enumerate(("rrr", "pca")):
@@ -706,13 +719,13 @@ def average_quantile_grid(quantiles):
                         ax.plot(grid, means[:, index], color=color, linewidth=2,
                                 label=f"{level:.0%} (n={counts[index]})")
                 ax.set_xscale("symlog", linthresh=.01)
-                ax.set(xlim=(0, 1), ylim=(0, 1.05), xlabel="Relative rank",
-                       ylabel="Mean normalized quantile performance",
-                       title=f"{LABELS[dataset]} · {method.upper()}")
+                ax.set(xlim=(0, 1), ylim=(0, 1.05), title=f"{LABELS[dataset]} · {method.upper()}",
+                       xlabel="Relative rank" if row == 2 else "",
+                       ylabel="Mean normalized\nquantile performance" if col == 0 and row == 1 else "")
                 finish_axis(ax)
-        axes[0, 0].legend(frameon=False, ncol=2)
-        figure.suptitle("Mean quantile convergence across model layers · peak > 0.005")
-        figure.tight_layout(rect=(0, 0, 1, .96))
+        axes[0, 0].legend(frameon=False, loc="lower right")
+        figure.suptitle("Mean quantile convergence across model layers · peak > 0.005", y=.995)
+        figure.tight_layout(rect=(0, 0, 1, .975))
         return figure
 
 
@@ -745,10 +758,11 @@ def quantile_saturation_robustness(quantiles, *, fraction=.99):
             ax.set_title(LABELS[dataset])
             ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{2 ** value:g}"))
         axes[0].set_ylabel("Saturation rank $k$")
-        figure.suptitle(f"Internal saturation robustness · all eligible quantiles at {fraction * 100:g}%")
+        figure.suptitle(f"Internal saturation robustness · all eligible quantiles at {fraction * 100:g}%",
+                        y=.995)
         figure.text(.5, .02, "25th, 50th, and 75th percentiles · positive peaks · monotonic curves",
-                    ha="center", fontsize=13)
-        figure.tight_layout(rect=(0, .05, 1, .91))
+                    ha="center", fontsize=14)
+        figure.tight_layout(rect=(0, .06, 1, .96))
         return figure
 
 
@@ -811,6 +825,7 @@ def sensitivity_grid(results, values, *, mode="internal", variable="fraction",
                 elif col != 0:
                     ax.set_ylabel("")
                     ax.tick_params(axis="y", labelleft=False)
+        thin_log2_rank_ticks(axes[0, 0])  # shared y: label every other power of two
         title = "Internal" if mode == "internal" else "Leave-one-subject-out"
         setting = ("minimum quantile peak correlation" if variable == "floor"
                    else "required fraction of maximum explained variance"
@@ -945,7 +960,7 @@ def decoding_auc_scatters(decoding):
         consensus = _decoding_consensus(frame)
         bound = (max(float(np.nanmax(np.abs(consensus[list(DATASETS)].to_numpy()))), .05)
                  if not consensus.empty else .05) * 1.05
-        ticks = MaxNLocator(nbins=5, symmetric=True).tick_values(-bound, bound)
+        ticks = MaxNLocator(nbins=3, symmetric=True).tick_values(-bound, bound)  # few ticks: labels must not touch
         limits = (float(ticks[0]), float(ticks[-1]))
         for col, (first, second) in enumerate(pairs):
             scatter = figure.add_subplot(grid[0, col])
@@ -989,7 +1004,7 @@ def roi_curves_figure(curves, region_sets, dataset, pair, *, fraction=.99, colum
     rows = -(-len(region_sets) // columns)
     with paper_style():
         figure, axes = plt.subplots(rows, columns, figsize=(4.6 * columns, 3.4 * rows),
-                                    squeeze=False)
+                                    sharey=True, squeeze=False)
         for ax, (region, members) in zip(axes.flat, region_sets.items()):
             inside = curves[identity.isin(list(members))]
             ax.set_title(region)

@@ -12,7 +12,7 @@ from matplotlib.ticker import MaxNLocator
 import numpy as np
 
 from src.utils.plotting.final_axes import (
-    COLORS, MODEL_COLORS, MODEL_NAMES, finish_axis, format_p_value, paper_style,
+    COLORS, MODEL_COLORS, MODEL_NAMES, finish_axis, format_p_value, legend_anchor_y, paper_style,
 )
 from src.utils.plotting.final_data import DATASETS, LABELS
 from src.utils.plotting.final_subspace_data import PCA_THRESHOLDS
@@ -101,7 +101,7 @@ def neural_pca_figure(summaries):
             for (threshold, count), color in zip(summary["needed"].items(), THRESHOLD_COLORS):
                 ax.plot([], [], color=color, linestyle="--",
                         label=f"{threshold:.0%} of variance: {count}")
-            ax.legend(frameon=False, loc="lower right", fontsize=14)
+            ax.legend(frameon=False, loc="upper left", fontsize=14)
             ax.set_xlabel("Number of principal components")
         axes[0, 0].set_ylabel("Cumulative fraction\nof variance explained")
         figure.tight_layout()
@@ -120,9 +120,9 @@ def embedding_pca_figure(result, model_layers, dataset):
                     _missing(ax)
                     continue
                 _threshold_curve(ax, summary["cumulative"], summary["needed"], line_width=1.8)
-                ax.text(.97, .05, "\n".join(f"{t:.0%}: {n}" for t, n in summary["needed"].items()),
-                        transform=ax.transAxes, ha="right", va="bottom", fontsize=SMALL,
-                        bbox={"facecolor": "white", "edgecolor": "none", "alpha": .85, "pad": 1.5})
+                # Upper left: the curve is low there, and it keeps the text off the dashed lines.
+                ax.text(.04, .96, "\n".join(f"{t:.0%}: {n}" for t, n in summary["needed"].items()),
+                        transform=ax.transAxes, ha="left", va="top", fontsize=SMALL)
                 ax.set_title(_panel_title(model, layer), fontsize=14, fontweight="bold")
                 ax.tick_params(labelsize=TICKS)
         thresholds = ", ".join(f"{t:.0%}" for t in PCA_THRESHOLDS)
@@ -143,8 +143,9 @@ def _rank_axis(ax):
     ax.grid(axis="x", alpha=.20)
 
 
-def _legend_below(ax):
-    ax.legend(frameon=False, fontsize=14, loc="upper center", bbox_to_anchor=(.5, -.22))
+def _legend_below(ax, ncol=1, y=-.22):
+    ax.legend(frameon=False, fontsize=14, loc="upper center", bbox_to_anchor=(.5, y), ncol=ncol,
+              columnspacing=1.0, handlelength=1.6, handletextpad=.5)
 
 
 def subspace_consistency_figure(data, sample_model, sample_layer):
@@ -153,7 +154,7 @@ def subspace_consistency_figure(data, sample_model, sample_layer):
     ranks = np.array([2 ** p for p in range(int(np.log2(data["dim"])) + 1)])
     chance = ranks / data["dim"]
     with paper_style():
-        figure, axes = plt.subplots(2, len(datasets), figsize=(6.2 * len(datasets), 11.5),
+        figure, axes = plt.subplots(2, len(datasets), figsize=(6.2 * len(datasets), 10),
                                     sharey=True)
         for ax, dataset in zip(axes[0], datasets):
             ax.set_title(f"{LABELS[dataset]} LOSO")
@@ -173,7 +174,7 @@ def subspace_consistency_figure(data, sample_model, sample_layer):
             if saturation is not None:
                 ax.axvline(saturation, label=f"Saturation rank: {saturation:.0f}", **SATURATION)
             _rank_axis(ax)
-            _legend_below(ax)
+            _legend_below(ax, ncol=2, y=-.12)
         pairs = (("podcast", "cars-2"), ("podcast", "fmri"), ("cars-2", "fmri"))
         colors = {"PCA vs PCA": (COLORS["PCA"], "-"), "RRR vs RRR": (COLORS["RRR"], "-")}
         for ax, (first, second) in zip(axes[1], pairs):
@@ -242,10 +243,12 @@ def loso_principal_angle_figure(data, sample_model, sample_layer):
             ax.set_xlabel("Angle index (smallest first)")
         handles, labels = next((a.get_legend_handles_labels() for a in axes.flat
                                 if a.get_legend_handles_labels()[0]), ([], []))
-        axes[0, 0].legend(handles, labels, frameon=False, loc="lower left", fontsize=13)
         figure.suptitle(f"LOSO principal angles: {MODEL_NAMES.get(sample_model, sample_model)}, "
                         f"layer {sample_layer} (thin lines: held-out subjects)")
         figure.tight_layout(rect=(0, 0, 1, .96))
+        figure.legend(handles, labels, frameon=False, fontsize=14, ncol=len(handles),
+                      loc="upper center", bbox_to_anchor=(.5, legend_anchor_y(figure)),
+                      columnspacing=1.2, handlelength=1.6, handletextpad=.4)
     return figure
 
 
@@ -253,13 +256,18 @@ def _layer_summaries(summaries, dataset):
     return {key: value for key, value in summaries.items() if key[0] == dataset}
 
 
-def _model_legend(ax, models, extra=(), loc="best"):
+def _model_legend(ax, models, extra=(), loc=None):
+    """One legend under the whole figure (call after the layout is final), so it covers no curve."""
     for model in MODEL_COLORS:
         if model in models:
             ax.plot([], [], color=MODEL_COLORS[model], linewidth=2.2, label=MODEL_NAMES[model])
     for kwargs in extra:
         ax.plot([], [], **kwargs)
-    ax.legend(frameon=False, fontsize=14, loc=loc)
+    figure = ax.figure
+    handles, labels = ax.get_legend_handles_labels()
+    figure.legend(handles, labels, frameon=False, fontsize=14, ncol=len(handles),
+                  loc="upper center", bbox_to_anchor=(.5, legend_anchor_y(figure)),
+                  columnspacing=1.2, handlelength=1.6, handletextpad=.4)
 
 
 def _mean_curve(stack):
@@ -297,8 +305,8 @@ def aligned_delta_figure(summaries, grid=np.arange(-5, 5.01, .25)):
             ax.set_xlabel("log$_2$(rank / saturation rank)")
             finish_axis(ax)
         axes[0].set_ylabel("RRR $-$ PCA excess overlap\nover chance")
-        _model_legend(axes[0], shown)
         figure.tight_layout()
+        _model_legend(axes[0], shown)
     return figure
 
 
@@ -355,6 +363,6 @@ def saturation_split_figure(table, separate_model=None):
         if separate_model is not None:
             extra.append({"color": MODEL_COLORS[separate_model], "marker": "D", "linestyle": "--",
                           "label": f"{MODEL_NAMES[separate_model]} mean"})
-        _model_legend(axes[0], shown, extra, loc="lower left")
         figure.tight_layout()
+        _model_legend(axes[0], shown, extra)
     return figure

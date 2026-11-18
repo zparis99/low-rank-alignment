@@ -11,7 +11,9 @@ from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
 
-from src.utils.plotting.final_axes import MODEL_COLORS, MODEL_NAMES, finish_axis, paper_style
+from src.utils.plotting.final_axes import (
+    MODEL_COLORS, MODEL_NAMES, finish_axis, legend_anchor_y, paper_style,
+)
 from src.utils.plotting.final_data import (
     LABELS, PAIRS, _cache_fingerprint, _read_cache, _write_cache, load_pair_products,
 )
@@ -226,7 +228,8 @@ def lag_saturation_figure(data, intervals=None, significance=None, *, ranks_labe
                 axes[0].plot([], [], color=MODEL_COLORS[model], linewidth=2.2, label=MODEL_NAMES[model])
         handles, labels = axes[0].get_legend_handles_labels()
         figure.tight_layout()
-        figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(.5, 0.0),
+        figure.legend(handles, labels, loc="upper center",
+                      bbox_to_anchor=(.5, legend_anchor_y(figure)),
                       ncol=3, frameon=False, fontsize=14)
     plt.close(figure)
     return figure

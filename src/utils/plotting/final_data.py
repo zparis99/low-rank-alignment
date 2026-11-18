@@ -626,7 +626,38 @@ def load_shuffled_internal_data(results_root, lag_summary="mean"):
     return data, gaps
 
 
-def load_final_data(results_root, lag_summary="mean"):
+def overlay_decoding_summaries(decoding, extra_roots):
+    """Add decoding summaries from additional results roots to the main ones.
+
+    Each extra root is a separate `results`-style tree (e.g. one holding only the volume
+    decoding task, run with a different `results_root`). Rows already present in the main
+    summaries for the same dataset/model/layer/offset/generation/variant/task are replaced
+    by the extra root's rows, so overlapping runs never double count.
+    """
+    extras = [frame for root in extra_roots
+              if not (frame := _decoding_summaries(Path(root))).empty]
+    if not extras:
+        return decoding
+    extra = pd.concat(extras, ignore_index=True)
+    if decoding.empty:
+        return extra
+    keys = ["dataset", "model", "layer", "label_offset", "generation", "variant", "task"]
+    drop = decoding[keys].fillna(-1).apply(tuple, axis=1).isin(
+        set(extra[keys].fillna(-1).apply(tuple, axis=1)))
+    return pd.concat([decoding[~drop], extra], ignore_index=True)
+
+
+def load_final_data(results_root, lag_summary="mean", extra_decoding_roots=()):
+    """`_load_final_data` plus decoding summaries from `extra_decoding_roots` (see
+    `overlay_decoding_summaries`). The overlay is applied after the results cache, so
+    the cache never depends on the extra roots."""
+    data = _load_final_data(results_root, lag_summary)
+    if not extra_decoding_roots:
+        return data
+    return (*data[:7], overlay_decoding_summaries(data[7], extra_decoding_roots), *data[8:])
+
+
+def _load_final_data(results_root, lag_summary="mean"):
     """Eagerly load all requested figures' inputs and return separate plain values.
 
     Returns (internal, loso, cross, quantiles, loso_quantiles, full_rows,

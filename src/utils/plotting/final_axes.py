@@ -39,6 +39,22 @@ def set_model_point_colors(enabled):
     return _COLOR_POINTS_BY_MODEL
 
 
+def legend_anchor_y(figure, pad=.008):
+    """Figure y just below all axes, labels and texts (existing figure legends ignored).
+
+    Used to hang the figure-level legends directly under the plots instead of at the figure edge.
+    """
+    hidden = [legend for legend in figure.legends if legend.get_visible()]
+    for legend in hidden:
+        legend.set_visible(False)
+    try:
+        box = figure.get_tightbbox(figure.canvas.get_renderer())
+    finally:
+        for legend in hidden:
+            legend.set_visible(True)
+    return box.y0 / figure.get_figheight() - pad
+
+
 def with_model_legend(build):
     """Decorate a figure function: when points are colored by model, add the model legend."""
     import functools
@@ -52,16 +68,13 @@ def with_model_legend(build):
             handles = [plt.Line2D([], [], marker="o", linestyle="", markersize=9,
                                   markerfacecolor=MODEL_COLORS[m], markeredgecolor="white",
                                   label=MODEL_NAMES[m]) for m in order]
-            # Centre the legend under the distribution plots (not the whole figure), wrapping
-            # to extra rows when those plots are narrower than one row of entries.
+            # Always a single row, centred under the distribution plots.
             boxes = [ax.get_position() for ax in figure.axes if getattr(ax, "_has_model_points", False)]
             left, right = min(box.x0 for box in boxes), max(box.x1 for box in boxes)
-            width_in = (right - left) * figure.get_figwidth()
-            entry_in = .75 + .105 * max(len(MODEL_NAMES[m]) for m in order)
-            ncol = max(1, min(len(handles), int(width_in // entry_in)))
             figure.legend(handles=handles, loc="upper center",
-                          bbox_to_anchor=((left + right) / 2, 0.0), ncol=ncol, frameon=False,
-                          fontsize=14, title="Point color: model", title_fontsize=14,
+                          bbox_to_anchor=((left + right) / 2, legend_anchor_y(figure)),
+                          ncol=len(handles), frameon=False,
+                          fontsize=14,
                           columnspacing=.9, handletextpad=.1, labelspacing=.25,
                           borderpad=.1, borderaxespad=0)
         return figure
@@ -113,6 +126,13 @@ def add_bracket_headroom(ax, n_brackets, *, extra=.0):
     low, high = ax.get_ylim()
     ceiling = .90 - .12 * (n_brackets - 1) - .06 - extra
     ax.set_ylim(low, low + (high - low) / ceiling)
+
+
+def thin_log2_rank_ticks(ax, step=2):
+    """Label every `step`-th power of two on a (shared) log2 rank axis so short panels do not overlap."""
+    top = int(np.floor(ax.get_ylim()[1]))
+    ticks = np.arange(0, top + 1, step)
+    ax.set_yticks(ticks, [str(2 ** int(tick)) for tick in ticks])
 
 
 def _method_style(method):

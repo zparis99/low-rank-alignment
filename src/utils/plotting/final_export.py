@@ -285,6 +285,11 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
                     example_pair, mode="internal", saturation_mode=saturation_mode)))
     elif saturation_mode == "quantile":
         output_dir = output_dir / "quantile"
+        # Random GPT-2 is held out of the quantile figures, as in the main ones.
+        held_out = lambda value: figures.without_models(value, (RANDOM_MODEL,))
+        internal, loso, cross = held_out(internal), held_out(loso), held_out(cross)
+        quantiles, loso_quantiles = held_out(quantiles), held_out(loso_quantiles)
+        full_rows = held_out(full_rows)
         jobs = [
             ("rrr_internal_aggregate", lambda: figures.rrr_aggregate(
                 internal, loso, quantiles, loso_quantiles, full_rows, example_pair,
@@ -385,6 +390,10 @@ def main(argv=None):
     parser.add_argument("--loso-example-model", help="Override the LOSO example model")
     parser.add_argument("--loso-example-layer", type=_layer, default=argparse.SUPPRESS,
                         help="Override the LOSO example layer, or 'none'")
+    parser.add_argument("--extra-decoding-root", type=Path, nargs="+", default=[],
+                        help="Extra results root(s) whose run_language_decoding summaries are "
+                             "added to the language-decoding figures (e.g. results_volume). "
+                             "Matching rows replace the main results' rows.")
     args = parser.parse_args(argv)
 
     import matplotlib
@@ -394,7 +403,7 @@ def main(argv=None):
 
     results_root = Path(__file__).resolve().parents[3] / "results"
     print(f"Loading result summaries from {results_root} (using the cache when valid)...", flush=True)
-    data = load_final_data(results_root)
+    data = load_final_data(results_root, extra_decoding_roots=args.extra_decoding_root)
     print("Result summaries loaded. Validating example model/layers...", flush=True)
     example_pair = (args.example_model, args.example_layer)
     loso_pair = (args.loso_example_model or args.example_model,
