@@ -16,13 +16,11 @@ comparable across models and methods.
 
 from __future__ import annotations
 
-from pathlib import Path
-import re
-
 import numpy as np
 
-from src.utils.plotting.final_data import (
-    DATASETS, _ev_scale, _fisher, _lagged, _load_matrix, _metric_name, _rrr,
+from src.utils.plotting.final_data import DATASETS
+from src.utils.plotting.final_products import (  # noqa: F401  (re-exported)
+    VARIANTS, cluster_labels, probe_of, sums_by_cluster,
 )
 from src.utils.rrr.plot_metrics import explained_variance_saturation_rank, normalized_log_rank_auc
 
@@ -32,80 +30,9 @@ FRACTION = .99
 LEVEL = 95.0
 METHODS = ("rrr", "pca")
 
-
-def probe_of(electrode):
-    """Depth probe of an sEEG contact: its name without the trailing contact number."""
-    return re.sub(r"\d+$", "", str(electrode))
-
-
-def cluster_labels(dataset, targets):
-    """Resampling cluster of every target (row of the RRR target table)."""
-    subjects = targets["subject"].astype(str)
-    if dataset == "cars-2":
-        return (subjects + "/" + targets["electrode"].map(probe_of)).to_numpy()
-    return subjects.to_numpy()
-
-
-def squared_correlations(results_root, dataset, model, layer, method, fmri_noise_normalized=True,
-                         source=None):
-    """Per-target explained variance at every rank: `(ranks, [rank, target, lag] r^2, targets)`.
-
-    r^2 is the fold-averaged correlation clipped at zero and squared (fMRI: divided by the voxel's
-    squared noise ceiling, voxels without one are NaN). `source` selects the directed
-    cross-dataset (transfer) results for target `dataset` instead of the internal run. Returns
-    None when the method has no per-target metrics.
-    """
-    if source is None:
-        artifact = _rrr(Path(results_root), "internal", dataset, model, layer
-                        ).load_artifacts(["target_manifest"])
-        matrix = _load_matrix(artifact, method, _metric_name(dataset, method))
-    else:
-        artifact = _rrr(Path(results_root), "cross_dataset", dataset, model, layer, source)
-        if dataset == "fmri":
-            candidates = ("corr_per_target",)
-        elif method == "rrr":
-            candidates = ("nr_orth_corr_per_target", "nr_corr_per_target")
-        else:
-            candidates = ("pca_corr_per_target",)
-        matrix = next((m for m in (_load_matrix(artifact, method, name) for name in candidates)
-                       if m is not None), None)
-    if matrix is None:
-        return None
-    values = np.asarray(_fisher(_lagged(matrix), axis=1), dtype=float)  # [rank, target, lag]
-    squared = np.where(np.isfinite(values), np.maximum(values, 0) ** 2, np.nan)
-    scale = _ev_scale(results_root, dataset, matrix.targets, fmri_noise_normalized)
-    if scale is not None:  # fMRI: fraction of explainable variance; no ceiling -> dropped
-        squared = squared / np.where(scale > 0, scale, np.nan)[None, :, None]
-    return np.asarray(matrix.ranks, dtype=float), squared, matrix.targets
-
-
-def sums_by_cluster(squared, labels, names=None):
-    """Summed r^2 and pair counts per cluster: `(sums [cluster, rank], counts, names)`.
-
-    Summing every cluster and dividing gives exactly the plotted mean r^2 per (target, lag) pair.
-    """
-    names = sorted(set(labels)) if names is None else names
-    sums = np.empty((len(names), squared.shape[0]))
-    counts = np.empty_like(sums)
-    for index, name in enumerate(names):
-        block = squared[:, labels == name, :].reshape(squared.shape[0], -1)
-        sums[index] = np.nansum(block, axis=1)
-        counts[index] = np.isfinite(block).sum(axis=1)
-    return sums, counts, names
-
-
-def cluster_sums(results_root, dataset, model, layer, method, fmri_noise_normalized=True):
-    """Per-cluster summed r^2 and pair counts at every rank for one internal RRR/PCA curve.
-
-    Returns `(ranks, sums [cluster, rank], counts [cluster, rank], cluster names)`.
-    """
-    loaded = squared_correlations(results_root, dataset, model, layer, method,
-                                  fmri_noise_normalized)
-    if loaded is None:
-        return None
-    ranks, squared, targets = loaded
-    sums, counts, names = sums_by_cluster(squared, cluster_labels(dataset, targets))
-    return ranks, sums, counts, names
+# Every interval is computed from `final_data.load_pair_products` (cluster sums of the already-read
+# results, no file reads here) for the main variant (fMRI r^2 as a fraction of explainable
+# variance) and, for fMRI targets only, the raw-r^2 variant.
 
 
 def bootstrap_counts(n_clusters, n_boot=N_BOOT, seed=SEED):
@@ -131,33 +58,30 @@ def _interval(draws):
     return float(low), float(high)
 
 
-def internal_intervals(results_root, model_layers, datasets=tuple(DATASETS), log=None,
-                       fmri_noise_normalized=True):
-    """`{(dataset, model, method): (low, high)}` in log2 saturation rank for internal runs."""
-    result = {}
+def internal_intervals(products, model_layers, datasets=tuple(DATASETS), log=None):
+    """`{variant: {(dataset, model, method): (low, high)}}` in log2 saturation rank (internal runs)."""
+    result = {variant: {} for variant in VARIANTS}
     for dataset in datasets:
         multiplicity, expected = None, None
         for model, layers in model_layers:
-            draws = {method: [] for method in METHODS}
+            draws = {variant: {method: [] for method in METHODS} for variant in VARIANTS}
             for layer in layers:
+                internal = products.get((dataset, model, layer), {}).get("internal", {})
                 for method in METHODS:
-                    try:
-                        sums = cluster_sums(results_root, dataset, model, layer, method,
-                                            fmri_noise_normalized)
-                    except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError):
-                        sums = None
-                    if sums is None:
+                    entry = internal.get(method)
+                    if entry is None:
                         continue
-                    ranks, cluster_sum, cluster_count, names = sums
-                    if multiplicity is None or names != expected:
-                        # Targets are shared by every model layer, so the resamples are too.
-                        expected = names
-                        multiplicity = bootstrap_counts(len(names))
-                    draws[method].append(resampled_log2_saturation(
-                        ranks, cluster_sum, cluster_count, multiplicity))
-            for method, rows in draws.items():
-                if rows:
-                    result[(dataset, model, method)] = _interval(np.asarray(rows))
+                    for variant, (cluster_sum, cluster_count, names) in entry["clusters"].items():
+                        if multiplicity is None or names != expected:
+                            # Targets are shared by every model layer, so the resamples are too.
+                            expected = names
+                            multiplicity = bootstrap_counts(len(names))
+                        draws[variant][method].append(resampled_log2_saturation(
+                            entry["ranks"], cluster_sum, cluster_count, multiplicity))
+            for variant, by_method in draws.items():
+                for method, rows in by_method.items():
+                    if rows:
+                        result[variant][(dataset, model, method)] = _interval(np.asarray(rows))
             if log:
                 log(f"{dataset} {model}: {len(layers)} layers")
     return result
@@ -194,80 +118,60 @@ def loso_intervals(loso_curves, saturation_rank, min_subjects=5):
     return result
 
 
-def saturation_intervals(results_root, loso_curves, model_layers, log=None,
-                         fmri_noise_normalized=True):
-    """All bootstrap intervals: `{"internal": {...}, "loso": {...}}` keyed `(dataset, model, method)`.
+def saturation_intervals(products, loso_curves, model_layers, raw_loso_curves=None, log=None):
+    """`{variant: {"internal": {...}, "loso": {...}}}` keyed `(dataset, model, method)`.
 
-    `loso_curves` is the explained-variance LOSO curve table of `load_final_data` (loaded with the
-    same `fmri_noise_normalized` setting); `model_layers` is `[(model, [layers])]`.
+    `loso_curves` / `raw_loso_curves` are the explained-variance LOSO curve tables of
+    `load_final_data` (main and `raw_fmri`); `model_layers` is `[(model, [layers])]`.
     """
     from src.utils.plotting.final_figures import _saturation_rank
 
     def loso_rank(ranks, curve):
         return _saturation_rank("explained_variance", ranks, curve, FRACTION)
 
-    return {"internal": internal_intervals(results_root, model_layers, log=log,
-                                          fmri_noise_normalized=fmri_noise_normalized),
-            "loso": loso_intervals(loso_curves, loso_rank)}
+    internal = internal_intervals(products, model_layers, log=log)
+    return {"normalized": {"internal": internal["normalized"],
+                           "loso": loso_intervals(loso_curves, loso_rank)},
+            "raw_fmri": {"internal": internal["raw_fmri"],
+                         "loso": loso_intervals(raw_loso_curves or {}, loso_rank)}}
 
 
 MIN_CLUSTERS = 5  # regions with fewer subjects / probes than this get no interval
 
 
-def roi_intervals(results_root, data_roots, regions, model_layers, fmri_noise_normalized=True,
-                  min_clusters=MIN_CLUSTERS, log=None):
-    """`{(dataset, region, model, method): (low, high)}` log2 saturation-rank intervals per ROI.
+def roi_intervals(products, regions, model_layers, min_clusters=MIN_CLUSTERS, log=None):
+    """`{variant: {(dataset, region, model, method): (low, high)}}` log2 saturation-rank intervals.
 
     Within each bihemispheric ROI the clusters (subjects; Cars 2 depth probes) of its targets are
     resampled. Regions with fewer than `min_clusters` clusters are skipped. All models share the
     resamples of a region.
     """
-    from scripts.run_rrr import _dataset_adapter_name
-    from src.core.registry import get_dataset_adapter
-    from src.utils.atlas.core import bihemispheric_region_groups
-
-    groups = bihemispheric_region_groups()
-    result = {}
+    result = {variant: {} for variant in VARIANTS}
     for dataset in DATASETS:
-        adapter = get_dataset_adapter(_dataset_adapter_name(DATASETS[dataset]))
-        region_info = None
         multiplicity = {}
         for model, layers in model_layers:
-            draws = {}
+            draws = {variant: {} for variant in VARIANTS}
             for layer in layers:
+                internal = products.get((dataset, model, layer), {}).get("internal", {})
                 for method in METHODS:
-                    try:
-                        loaded = squared_correlations(results_root, dataset, model, layer, method,
-                                                      fmri_noise_normalized)
-                    except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError):
-                        loaded = None
-                    if loaded is None:
+                    entry = internal.get(method)
+                    if entry is None:
                         continue
-                    ranks, squared, targets = loaded
-                    if region_info is None:
-                        located = targets.copy()
-                        located[["x", "y", "z"]] = adapter.get_electrode_coordinates(
-                            located, str(data_roots[dataset]))
-                        atlas = adapter.get_target_atlas_labels(located, str(data_roots[dataset]))
-                        clusters = cluster_labels(dataset, targets)
-                        region_info = {
-                            region: np.flatnonzero(np.isin(atlas, list(groups[region])))
-                            for region in regions}
-                    for region in regions:
-                        keep = region_info[region]
-                        if not len(keep):
-                            continue
-                        names = sorted(set(clusters[keep]))
-                        if len(names) < min_clusters:
-                            continue
-                        sums, counts, _ = sums_by_cluster(
-                            squared[:, keep, :], clusters[keep], names)
-                        if region not in multiplicity:
-                            multiplicity[region] = bootstrap_counts(len(names))
-                        draws.setdefault((region, method), []).append(
-                            resampled_log2_saturation(ranks, sums, counts, multiplicity[region]))
-            for (region, method), rows in draws.items():
-                result[(dataset, region, model, method)] = _interval(np.asarray(rows))
+                    for variant, by_region in entry["roi"].items():
+                        for region in regions:
+                            if region not in by_region:
+                                continue
+                            sums, counts, names = by_region[region]
+                            if len(names) < min_clusters:
+                                continue
+                            if region not in multiplicity:
+                                multiplicity[region] = bootstrap_counts(len(names))
+                            draws[variant].setdefault((region, method), []).append(
+                                resampled_log2_saturation(
+                                    entry["ranks"], sums, counts, multiplicity[region]))
+            for variant, by_key in draws.items():
+                for (region, method), rows in by_key.items():
+                    result[variant][(dataset, region, model, method)] = _interval(np.asarray(rows))
             if log:
                 log(f"ROI {dataset} {model}")
     return result
@@ -280,77 +184,86 @@ AUC_COMPARISONS = (
 )
 
 
-def auc_intervals(results_root, model_layers, fmri_noise_normalized=True, log=None):
-    """`{(target, source, model, comparison title): (low, high)}` for normalized-AUC differences.
+def auc_intervals(products, model_layers, log=None):
+    """`{variant: {(target, source, model, comparison title): (low, high)}}` for AUC differences.
 
     Target clusters (subjects; Cars 2 probes) are resampled once per draw and the within-dataset and
     transfer curves are rebuilt from the same draw, so each draw's difference is paired. The
     intervals are per model: the differences of its layers are averaged within every draw.
     """
-    result = {}
+    result = {variant: {} for variant in VARIANTS}
     for target in DATASETS:
         for source in DATASETS:
             if source == target:
                 continue
             multiplicity, expected = None, None
             for model, layers in model_layers:
-                draws = {title: [] for title, _, _ in AUC_COMPARISONS}
+                draws = {variant: {title: [] for title, _, _ in AUC_COMPARISONS}
+                         for variant in VARIANTS}
                 for layer in layers:
-                    curves = {}
-                    for kind in ("within", "transfer"):
+                    pair = products.get((target, model, layer), {})
+                    curves = {variant: {} for variant in VARIANTS}
+                    for kind, found in (("within", pair.get("internal", {})),
+                                        ("transfer", pair.get("cross", {}).get(source, {}))):
                         for method in METHODS:
-                            try:
-                                loaded = squared_correlations(
-                                    results_root, target, model, layer, method,
-                                    fmri_noise_normalized, None if kind == "within" else source)
-                            except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError):
-                                loaded = None
-                            if loaded is not None:
-                                ranks, squared, targets = loaded
-                                sums, counts, names = sums_by_cluster(
-                                    squared, cluster_labels(target, targets))
-                                curves[(kind, method)] = (ranks, sums, counts, names)
-                    if len(curves) < 4:
-                        continue
-                    names = curves[("within", "rrr")][3]
-                    if any(value[3] != names for value in curves.values()):
-                        continue  # the target clusters differ between runs: cannot pair draws
-                    if multiplicity is None or names != expected:
-                        expected, multiplicity = names, bootstrap_counts(len(names))
-                    aucs = {}
-                    for key, (ranks, sums, counts, _) in curves.items():
-                        with np.errstate(all="ignore"):
-                            resampled = (multiplicity @ sums) / (multiplicity @ counts)
-                        aucs[key] = np.array([normalized_log_rank_auc(ranks, curve)
-                                              for curve in resampled])
-                    for title, first, second in AUC_COMPARISONS:
-                        draws[title].append(aucs[first] - aucs[second])
-                for title, rows in draws.items():
-                    if rows:
-                        result[(target, source, model, title)] = _interval(np.asarray(rows))
+                            entry = found.get(method)
+                            for variant, (sums, counts, names) in (
+                                    entry["clusters"].items() if entry else ()):
+                                curves[variant][(kind, method)] = (
+                                    entry["ranks"], sums, counts, names)
+                    for variant, variant_curves in curves.items():
+                        if len(variant_curves) < 4:
+                            continue
+                        names = variant_curves[("within", "rrr")][3]
+                        if any(value[3] != names for value in variant_curves.values()):
+                            continue  # the target clusters differ between runs: cannot pair draws
+                        if multiplicity is None or names != expected:
+                            expected, multiplicity = names, bootstrap_counts(len(names))
+                        aucs = {}
+                        for key, (ranks, sums, counts, _) in variant_curves.items():
+                            with np.errstate(all="ignore"):
+                                resampled = (multiplicity @ sums) / (multiplicity @ counts)
+                            aucs[key] = np.array([normalized_log_rank_auc(ranks, curve)
+                                                  for curve in resampled])
+                        for title, first, second in AUC_COMPARISONS:
+                            draws[variant][title].append(aucs[first] - aucs[second])
+                for variant, by_title in draws.items():
+                    for title, rows in by_title.items():
+                        if rows:
+                            result[variant][(target, source, model, title)] = _interval(
+                                np.asarray(rows))
                 if log:
                     log(f"AUC {source}->{target} {model}")
     return result
 
 
-def interval_tables(results_root, loso_curves, model_layers, data_roots, regions,
-                    fmri_noise_normalized=True, log=None):
+def interval_tables(results_root, loso_curves, model_layers, raw_loso_curves=None, log=None):
     """All bootstrap intervals, each piece cached separately (see `final_subspace_data.cached`).
 
-    Returns `{"internal", "loso", "auc", "roi"}`: saturation-rank intervals keyed
-    `(dataset, model, method)` (log2), `(dataset, region, model, method)` for ROIs (log2), and
-    AUC-difference intervals keyed `(target, source, model, comparison)`.
+    Returns `{"internal", "loso", "auc", "roi", "raw_fmri": {the same four}}`: saturation-rank
+    intervals keyed `(dataset, model, method)` (log2), `(dataset, region, model, method)` for
+    ROIs (log2), and AUC-difference intervals keyed `(target, source, model, comparison)`. The
+    `raw_fmri` entry is the same for raw fMRI r^2 and only has fMRI-target keys. Everything is
+    computed from `load_pair_products`, so no result is read here.
     """
+    from src.utils.atlas.core import bihemispheric_region_groups
+    from src.utils.plotting.final_data import load_pair_products
     from src.utils.plotting.final_subspace_data import cached
 
-    tag = "" if fmri_noise_normalized else "_raw_fmri"
-    saturation = cached(results_root, "saturation_cis" + tag, lambda: saturation_intervals(
-        results_root, loso_curves, model_layers, log=log,
-        fmri_noise_normalized=fmri_noise_normalized))
+    regions = list(bihemispheric_region_groups())
+    products = lambda: load_pair_products(results_root)
+    saturation = cached(results_root, "saturation_cis_v3", lambda: saturation_intervals(
+        products(), loso_curves, model_layers, raw_loso_curves, log=log))
+    auc = cached(results_root, "auc_cis_v3", lambda: auc_intervals(products(), model_layers, log))
+    roi = cached(results_root, "roi_cis_v3", lambda: roi_intervals(
+        products(), regions, model_layers, log=log))
+    only_fmri = lambda table: {key: value for key, value in table.items() if key[0] == "fmri"}
     return {
-        **saturation,
-        "auc": cached(results_root, "auc_cis" + tag, lambda: auc_intervals(
-            results_root, model_layers, fmri_noise_normalized, log)),
-        "roi": cached(results_root, "roi_cis" + tag, lambda: roi_intervals(
-            results_root, data_roots, regions, model_layers, fmri_noise_normalized, log=log)),
+        **saturation["normalized"], "auc": auc["normalized"], "roi": roi["normalized"],
+        "raw_fmri": {
+            "internal": only_fmri(saturation["raw_fmri"]["internal"]),
+            "loso": only_fmri(saturation["raw_fmri"]["loso"]),
+            "auc": only_fmri(auc["raw_fmri"]),
+            "roi": only_fmri(roi["raw_fmri"]),
+        },
     }

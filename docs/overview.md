@@ -184,8 +184,15 @@ HDF5 container while keeping plots as separately browsable PNG files.
   figures to `figures/quantile/`. `--format pdf`, `--format png`, or `--format svg` selects one format.
   `--all` exports every notebook figure in one run: the explained-variance set (including the
   shuffled-embedding internal aggregate, `rrr_internal_aggregate_shuffled`, plus any shuffled
-  result gaps in `result_gaps.txt`), the quantile appendix in `quantile/`, and the raw-fMRI-r^2
-  appendix in `raw_fmri/`.
+  result gaps in `result_gaps.txt`), the quantile appendix in `quantile/`, and the fMRI-only
+  raw-fMRI-r^2 appendix in `raw_fmri/` (internal, LOSO and fMRI-target cross-dataset aggregates plus the
+  fMRI column of the two ROI figures).
+  `--scope local|remote` (default `all`) splits any of those exports by where the data lives: `local`
+  writes every figure whose results are complete in the local `results/` (and never loads the shuffled
+  control or validates a LOSO example); `remote` writes only the figures needing results held on the remote
+  host (LOSO aggregates and sensitivity, the LOSO subspace figures, language decoding and the shuffled
+  control; `REMOTE_ONLY` in `final_export.py`, per main/quantile/raw_fmri set). Filenames match, so the two
+  output folders can be merged; `significant_targets.tex` comes with `local`, `result_gaps.txt` with both.
   `--example-model gpt2 --example-layer 6` selects the sample curves in both
   RRR aggregates and the target-quantile figure (default: GPT-2 layer 0);
   `--loso-example-model` and `--loso-example-layer` override the LOSO example.
@@ -201,8 +208,17 @@ HDF5 container while keeping plots as separately browsable PNG files.
   **Statistics and conventions in the final figures.** fMRI explained variance is always the
   noise-normalized fraction of explainable variance (`r^2 / max(CC_max, 0.25)^2` per voxel, voxels
   without a ceiling dropped; `_ev_scale` in `final_data.py`); Podcast and Cars 2 have no noise ceiling and use
-  raw `r^2`. `load_final_data(..., fmri_noise_normalized=False)` gives the raw-`r^2` fMRI tables used by the
-  notebook's appendix ("fMRI without noise normalization", cached separately). Random GPT-2 is left out of
+  raw `r^2`. The raw-`r^2` fMRI tables of the appendix ("fMRI without noise normalization", fMRI only) are
+  computed in the same pass over the same loaded results (`load_final_data(...)[9].raw_fmri`,
+  `roi_curve_tables`, and the `raw_fmri` entry of `interval_tables`), so no result is read twice.
+  **One read per result.** `load_final_data` is the only reader of the RRR results for the final figures:
+  while each (dataset, model, layer) matrix is in memory it also derives the small per-result products of
+  `final_products.result_products` (cluster r^2 sums for the bootstrap, per-ROI sums and curves, per-lag
+  sums, directed transfer sums), cached in `results/.final_plots_products.pkl` and exposed by
+  `load_pair_products`. `final_bootstrap` (`interval_tables`), `roi_saturation.roi_curve_tables` and
+  `final_lag_saturation` consume only those products and open no result files. The ROI atlas lookup is
+  memoized per target table (`target_atlas_labels`). The products need `data/` next to `results/`;
+  without it ROI products are skipped. Random GPT-2 is left out of
   the main figures and shown only in companion figures as its own violins; GloVe is included. Layers of a
   model are not independent, so every significance test averages layers within each model and runs an exact
   paired sign-flip test across models (`model_sign_flip` in `plot_metrics.py`; the smallest possible p is
@@ -226,7 +242,7 @@ HDF5 container while keeping plots as separately browsable PNG files.
   Figure titles name each dataset with its modality via `LABELS` in `final_data.py`:
   Podcast (ECoG), Cars 2 (sEEG), Moth (fMRI). Editing `final_data.py` invalidates the results caches.
   The export matches the notebook: it colors distribution-plot points by model, draws the 95% bootstrap
-  intervals (`bootstrap_intervals`, cached, from `final_bootstrap.interval_tables`; main and raw-fMRI sets,
+  intervals (`bootstrap_intervals`, cached, from `final_bootstrap.interval_tables`; main and fMRI-only raw sets,
   none for the quantile appendix, shuffled control or sensitivity grids), and writes `lag_saturation`.
   Running without arguments retains interactive notebook execution.
   Shared artifact-independent rank calculations live in

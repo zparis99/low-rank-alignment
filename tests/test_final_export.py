@@ -39,7 +39,7 @@ def test_example_selection(monkeypatch, tmp_path, arguments, internal, loso):
     monkeypatch.setattr(final_data, "load_final_data", lambda root, **kwargs: data)
     monkeypatch.setattr(final_data, "load_shuffled_internal_data", lambda root: "shuffled")
     calls = []
-    monkeypatch.setattr(final_export, "export_figures", lambda *args: calls.append(args))
+    monkeypatch.setattr(final_export, "export_figures", lambda *args, **kwargs: calls.append(args))
     final_export.main(["--output-dir", str(tmp_path), *arguments])
     assert calls == [(data, tmp_path, ["pdf", "png", "svg"], internal, loso,
                       "explained_variance", "shuffled", ("intervals", {}))]
@@ -49,7 +49,7 @@ def test_saturation_mode_argument(monkeypatch, tmp_path):
     data = _data()
     monkeypatch.setattr(final_data, "load_final_data", lambda root, **kwargs: data)
     calls = []
-    monkeypatch.setattr(final_export, "export_figures", lambda *args: calls.append(args))
+    monkeypatch.setattr(final_export, "export_figures", lambda *args, **kwargs: calls.append(args))
     final_export.main(["--output-dir", str(tmp_path), "--saturation-mode", "quantile"])
     assert calls[0][5] == "quantile"
     assert calls[0][7] is None  # the quantile appendix has no intervals
@@ -68,8 +68,10 @@ def test_all_exports_every_appendix(monkeypatch, tmp_path):
     assert [call[5] for call in calls] == ["explained_variance", "quantile", "raw_fmri"]
     assert calls[0][6] == "shuffled"
     assert calls[0][7] == ("intervals", {})
-    assert calls[2][-1] == {"intervals": ("intervals", {"fmri_noise_normalized": False})}
-    assert loads == [{}, {"fmri_noise_normalized": False}]
+    # The raw-fMRI appendix reuses the single load and the single set of intervals.
+    assert calls[2][0] is data
+    assert calls[2][-1] == {"intervals": ("intervals", {}), "scope": "all"}
+    assert loads == [{}]
 
 
 @pytest.mark.parametrize("saturation_mode", ["explained_variance", "quantile"])
@@ -94,3 +96,56 @@ def test_incomplete_example_rejected_before_export(monkeypatch, tmp_path, capsys
     assert error.value.code == 2
     assert "Available model/layer pairs: glove/none" in capsys.readouterr().err
     assert not output.exists()
+
+
+@pytest.mark.parametrize("mode", sorted(final_export.REMOTE_ONLY))
+def test_scopes_partition_the_jobs(mode):
+    names = ["rrr_internal_aggregate", *sorted(final_export.REMOTE_ONLY[mode]), "lag_saturation"]
+    jobs = [(name, name) for name in names]
+    local = {name for name, _ in final_export.select_jobs(jobs, mode, "local")}
+    remote = {name for name, _ in final_export.select_jobs(jobs, mode, "remote")}
+    assert local | remote == set(names) and not local & remote
+    assert remote == final_export.REMOTE_ONLY[mode]
+    assert final_export.select_jobs(jobs, mode, "all") == jobs
+    with pytest.raises(ValueError):
+        final_export.select_jobs(jobs, mode, "elsewhere")
+
+
+def test_every_loso_figure_is_remote():
+    # Anything drawn from leave-one-subject-out or decoding/shuffled results is remote-only.
+    remote = final_export.REMOTE_ONLY["explained_variance"]
+    assert {"rrr_loso_aggregate", "loso_saturation_sensitivity_fraction",
+            "language_decoding_aggregate", "rrr_internal_aggregate_shuffled",
+            "loso_principal_angles", "subspace_consistency"} <= remote
+    assert not {"rrr_internal_aggregate", "rrr_cross_dataset_aggregate", "lag_saturation",
+                "significant_targets", "roi_normalized_curves"} & remote
+
+
+def test_local_scope_skips_remote_only_loads(monkeypatch, tmp_path):
+    data = _data()
+    # No LOSO example is needed locally, even when the local results lack it.
+    del data[9].loso_curves[("fmri", "gpt2", 0, 1, "RRR transfer")]
+    del data[9].loso_curves[("fmri", "gpt2", 0, 2, "RRR transfer")]
+    monkeypatch.setattr(final_data, "load_final_data", lambda root, **kwargs: data)
+    monkeypatch.setattr(final_data, "load_shuffled_internal_data",
+                        lambda root: pytest.fail("shuffled control is remote-only"))
+    calls = []
+    monkeypatch.setattr(final_export, "export_figures",
+                        lambda *args, **kwargs: calls.append((args, kwargs)))
+    final_export.main(["--output-dir", str(tmp_path), "--scope", "local"])
+    assert calls[0][0][6] is None and calls[0][1] == {"scope": "local"}
+    calls.clear()
+    monkeypatch.setattr(final_data, "load_shuffled_internal_data", lambda root: "shuffled")
+    with pytest.raises(SystemExit):  # the remote scope does need the LOSO example
+        final_export.main(["--output-dir", str(tmp_path), "--scope", "remote"])
+
+
+def test_scope_forwarded_to_every_appendix(monkeypatch, tmp_path):
+    data = _data()
+    monkeypatch.setattr(final_data, "load_final_data", lambda root, **kwargs: data)
+    monkeypatch.setattr(final_data, "load_shuffled_internal_data", lambda root: "shuffled")
+    calls = []
+    monkeypatch.setattr(final_export, "export_figures",
+                        lambda *args, **kwargs: calls.append(kwargs) or [])
+    final_export.main(["--output-dir", str(tmp_path), "--all", "--scope", "remote"])
+    assert [call["scope"] for call in calls] == ["remote"] * 3

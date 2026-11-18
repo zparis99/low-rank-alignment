@@ -36,7 +36,7 @@ LABELS = {"podcast": "Podcast (ECoG)", "cars-2": "Cars 2 (sEEG)", "fmri": "Moth 
 PAIRS = tuple((model, layer) for model, layers in MODEL_LAYERS.values() for layer in layers)
 FMRI_VARIANT = "input_scaling-pooled-training-stories-v1"
 CC_MAX_FLOOR = 0.25  # noise ceilings below this are floored (as in the fMRI histograms)
-CACHE_VERSION = 4
+CACHE_VERSION = 6
 LAG_SUMMARIES = ("mean", "peak")
 SATURATION_MODES = ("explained_variance", "quantile")
 
@@ -48,7 +48,9 @@ class ExplainedVarianceData(NamedTuple):
     column (mean r^2 per target) in place of `correlation`. `curves` and
     `loso_curves` mirror the quantile dictionaries, keyed the same way, with a
     (ranks, curve) pair. `full_rows` holds (dataset, model, layer, mean r^2) for the
-    full-model reference.
+    full-model reference. `raw_fmri` is the same structure restricted to the fMRI dataset with
+    raw r^2 instead of the fraction of explainable variance (the raw-fMRI appendix); it comes
+    from the very same loaded matrices.
     """
 
     internal: pd.DataFrame
@@ -57,6 +59,7 @@ class ExplainedVarianceData(NamedTuple):
     curves: dict
     loso_curves: dict
     full_rows: list
+    raw_fmri: "ExplainedVarianceData | None" = None
 
 @lru_cache(maxsize=None)
 def _noise_ceiling(results_root, subject):
@@ -67,15 +70,38 @@ def _noise_ceiling(results_root, subject):
         return archive["cc_max"].astype(float)
 
 
-def _ev_scale(results_root, dataset, targets, normalize=True):
+_ATLAS_LABELS = {}
+
+
+def target_atlas_labels(dataset, targets, data_root):
+    """Destrieux label of every target (also adds `x`, `y`, `z` to a copy; not returned).
+
+    Targets are identical across model layers, so the (slow for fMRI) coordinate and atlas
+    lookup runs once per distinct target table and process, and is shared by every ROI consumer.
+    """
+    from scripts.run_rrr import _dataset_adapter_name
+    from src.core.registry import get_dataset_adapter
+
+    digest = hashlib.blake2b(
+        pd.util.hash_pandas_object(targets.reset_index(drop=True), index=False).to_numpy().tobytes(),
+        digest_size=16).hexdigest()
+    key = (dataset, str(data_root), len(targets), digest)
+    if key not in _ATLAS_LABELS:
+        adapter = get_dataset_adapter(_dataset_adapter_name(DATASETS[dataset]))
+        located = targets.copy()
+        located[["x", "y", "z"]] = adapter.get_electrode_coordinates(located, str(data_root))
+        _ATLAS_LABELS[key] = np.asarray(adapter.get_target_atlas_labels(located, str(data_root)))
+    return _ATLAS_LABELS[key]
+
+
+def _ev_scale(results_root, dataset, targets):
     """Per-target divisor of the explained variance: squared (floored) noise ceiling for fMRI.
 
     fMRI explained variance is always reported as a fraction of the explainable variance,
     r^2 / max(CC_max, CC_MAX_FLOOR)^2 per voxel; voxels without a defined ceiling are
-    left out. iEEG has no noise ceiling (returns None: plain r^2), and neither does fMRI with
-    `normalize=False` (the appendix's raw-r^2 version).
+    left out. iEEG has no noise ceiling (returns None: plain r^2).
     """
-    if dataset != "fmri" or not normalize:
+    if dataset != "fmri":
         return None
     subjects = targets["subject"].astype(str).to_numpy()
     ceiling = np.full(len(targets), np.nan)
@@ -89,7 +115,8 @@ def _ev_scale(results_root, dataset, targets, normalize=True):
 def _cache_fingerprint(results_root, lag_summary="mean"):
     """Track artifact manifests and summary code without opening large payloads."""
     digest = hashlib.blake2b(digest_size=20)
-    sources = (Path(__file__), Path(__file__).parents[1] / "rrr" / "plot_metrics.py")
+    sources = (Path(__file__), Path(__file__).with_name("final_products.py"),
+               Path(__file__).parents[1] / "rrr" / "plot_metrics.py")
     manifests = (
         path for category in ("run_rrr", "run_significance", "run_language_decoding")
         for path in (results_root / category).rglob("manifest.json")
@@ -272,13 +299,16 @@ def _summarize(values, ranks, lag_summary, ev_scale=None):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         quantiles = rank_quantiles(ranks, per_target, QUANTILES)
+    per_pair = _fisher(values, axis=1)
     return {
         "ranks": ranks,
         "fold_values": fold_values,
         "quantiles": (ranks, quantiles),
         "ev": explained_variance_curve(
-            _fisher(values, axis=1),
-            scale=None if ev_scale is None else np.asarray(ev_scale)[:, None]),
+            per_pair, scale=None if ev_scale is None else np.asarray(ev_scale)[:, None]),
+        # Same targets without the noise-ceiling division (fMRI only; the raw-r^2 appendix).
+        "ev_raw": None if ev_scale is None else explained_variance_curve(per_pair),
+        "per_pair": per_pair,  # [rank, target, lag]; reused for the bootstrap/ROI/lag products
     }
 
 
@@ -288,7 +318,7 @@ def _curve_rows(summary):
             for value in row if np.isfinite(value)]
 
 
-def _subject_summaries(matrix, values, lag_summary, ev_scale=None):
+def _subject_summaries(matrix, values, lag_summary, ev_scale=None, raw_ev=None):
     """Per-subject RRR curves from a pooled internal run (the LOSO full-training control)."""
     if "subject" not in matrix.targets:
         return [], {}, {}
@@ -305,27 +335,49 @@ def _subject_summaries(matrix, values, lag_summary, ev_scale=None):
         )
         quantiles[(subject, "RRR baseline")] = summary["quantiles"]
         ev[(subject, "RRR baseline")] = (summary["ranks"], summary["ev"])
+        if raw_ev is not None:
+            raw_ev[(subject, "RRR baseline")] = (summary["ranks"], summary["ev_raw"])
     return curves, quantiles, ev
 
 
 def _internal_one(results_root, dataset, model, layer, lag_summary="mean",
-                  fmri_noise_normalized=True, shuffled_embeddings=False):
+                  shuffled_embeddings=False, raw=None, products=None, region_indexer=None):
+    """One internal result. fMRI explained variance is the fraction of explainable variance;
+    pass a dict as `raw` to also receive the raw-r^2 versions (`ev`, `full_ev`, `subject_ev`)
+    computed from the same loaded matrices. Pass a dict as `products` to also receive, per
+    method, the `final_products.result_products` of the same loaded matrices (`region_indexer`
+    maps `(dataset, targets)` to each ROI's target indices, or None)."""
     artifact = _rrr(results_root, "internal", dataset, model, layer,
                     shuffled_embeddings=shuffled_embeddings).load_artifacts(
         ["target_manifest", "full_metrics"]
     )
     lag_summary = _summary_for(dataset, lag_summary)
     curves, quantiles, ev, rrr = [], {}, {}, None
+    raw_ev = {}
     for method in ("rrr", "pca"):
         matrix = _load_matrix(artifact, method, _metric_name(dataset, method))
         if matrix is None:
             continue
         values = _lagged(matrix)
-        scale = _ev_scale(results_root, dataset, matrix.targets, fmri_noise_normalized)
+        scale = _ev_scale(results_root, dataset, matrix.targets)
         summary = _summarize(values, matrix.ranks, lag_summary, scale)
         curves.extend((method, rank, value) for rank, value in _curve_rows(summary))
         quantiles[method] = summary["quantiles"]
         ev[method] = (summary["ranks"], summary["ev"])
+        if summary["ev_raw"] is not None:
+            raw_ev[method] = (summary["ranks"], summary["ev_raw"])
+        if products is not None:
+            from src.utils.plotting.final_products import result_products
+
+            lags = None
+            if dataset != "fmri":
+                lags = np.sort(_manifest_for(artifact, {"method": method})["lag"].unique())
+                if len(lags) != summary["per_pair"].shape[2]:
+                    lags = None  # the lag axis does not match the manifest: no per-lag products
+            products[method] = result_products(
+                dataset, matrix.ranks, summary["per_pair"], scale, matrix.targets,
+                region_index=None if region_indexer is None else region_indexer(
+                    dataset, matrix.targets), lags=lags)
         if method == "rrr":
             rrr = (matrix, values, scale)
     if not curves:
@@ -341,7 +393,7 @@ def _internal_one(results_root, dataset, model, layer, lag_summary="mean",
     full = (_electrode_values(full_folds, _manifest_for(artifact, {"method": "rrr"}), lag_summary)
             if full_folds else [])
     full_values = fisher_mean(np.stack(full), axis=0) if full else np.array([])
-    full_ev = np.nan
+    full_ev = full_ev_raw = np.nan
     if full_folds:
         pairs = _fisher(np.stack([np.asarray(f, dtype=float).reshape(-1) for f in full_folds]),
                         axis=0)
@@ -349,19 +401,24 @@ def _internal_one(results_root, dataset, model, layer, lag_summary="mean",
         if full_scale is not None and len(full_scale) != pairs.shape[0]:
             raise ValueError("full-model targets do not match the rank-curve targets")
         full_ev = float(explained_variance_curve(pairs[None, :], scale=full_scale)[0])
-    subject = (_subject_summaries(rrr[0], rrr[1], lag_summary, rrr[2]) if rrr is not None
-               else ([], {}, {}))
+        if full_scale is not None:
+            full_ev_raw = float(explained_variance_curve(pairs[None, :])[0])
+    subject_raw = {}
+    subject = (_subject_summaries(rrr[0], rrr[1], lag_summary, rrr[2], subject_raw)
+               if rrr is not None else ([], {}, {}))
+    if raw is not None and raw_ev:
+        raw.update(ev=raw_ev, full_ev=full_ev_raw, subject_ev=subject_raw)
     return curves, quantiles, ev, full_values, full_ev, subject
 
 
-def _loso_one(results_root, dataset, model, layer, lag_summary="mean",
-              fmri_noise_normalized=True):
+def _loso_one(results_root, dataset, model, layer, lag_summary="mean", raw=None):
+    """One LOSO result; pass a dict as `raw` to also receive the fMRI raw-r^2 `ev` curves."""
     artifact = _rrr(results_root, "leave_one_subject_out", dataset, model, layer).load_artifacts(
         ["target_manifest"]
     )
     names = {("rrr", "transfer"): "RRR transfer", ("pca", "baseline"): "PCA baseline"}
     lag_summary = _summary_for(dataset, lag_summary)
-    curves, quantiles, ev = [], {}, {}
+    curves, quantiles, ev, raw_ev = [], {}, {}, {}
     for (method, phase), label in names.items():
         held_out = sorted({dict(key)["held_out_subject"] for key in artifact.target_manifest
                            if dict(key).get("method") == method
@@ -375,20 +432,25 @@ def _loso_one(results_root, dataset, model, layer, lag_summary="mean",
             if matrix is None:
                 continue
             summary = _summarize(_lagged(matrix), matrix.ranks, lag_summary,
-                                 _ev_scale(results_root, dataset, matrix.targets,
-                                           fmri_noise_normalized))
+                                 _ev_scale(results_root, dataset, matrix.targets))
             curves.extend((str(subject), label, rank, value)
                           for rank, value in _curve_rows(summary))
             quantiles[(str(subject), label)] = summary["quantiles"]
             ev[(str(subject), label)] = (summary["ranks"], summary["ev"])
+            if summary["ev_raw"] is not None:
+                raw_ev[(str(subject), label)] = (summary["ranks"], summary["ev_raw"])
+    if raw is not None and raw_ev:
+        raw["ev"] = raw_ev
     return curves, quantiles, ev
 
 
 def _cross_one(results_root, target, source, model, layer, internal_curves,
-               internal_ev, lag_summary="mean", fmri_noise_normalized=True):
+               internal_ev, lag_summary="mean", internal_ev_raw=None, raw=None, products=None):
+    """One directed result. For an fMRI target, pass the raw internal curves as `internal_ev_raw`
+    and a dict as `raw` to also receive `ev_frame` with raw-r^2 explained variance."""
     artifact = _rrr(results_root, "cross_dataset", target, model, layer, source)
     lag_summary = _summary_for(target, lag_summary)
-    records, ev_records = [], []
+    records, ev_records, raw_records = [], [], []
     for method in ("rrr", "pca"):
         label = f"Transfer {method.upper()}"
         if target == "fmri":
@@ -402,16 +464,28 @@ def _cross_one(results_root, target, source, model, layer, internal_curves,
         if matrix is None:
             continue
         summary = _summarize(_lagged(matrix), matrix.ranks, lag_summary,
-                             _ev_scale(results_root, target, matrix.targets,
-                                       fmri_noise_normalized))
+                             _ev_scale(results_root, target, matrix.targets))
         records.extend((label, rank, value) for rank, value in _curve_rows(summary))
         ev_records.extend((label, int(rank), float(value))
                           for rank, value in zip(summary["ranks"], summary["ev"]))
+        if products is not None:
+            from src.utils.plotting.final_products import result_products
+
+            products[method] = result_products(
+                target, matrix.ranks, summary["per_pair"],
+                _ev_scale(results_root, target, matrix.targets), matrix.targets,
+                cluster_only=True)
+        if summary["ev_raw"] is not None:
+            raw_records.extend((label, int(rank), float(value))
+                               for rank, value in zip(summary["ranks"], summary["ev_raw"]))
     for method, rank, value in internal_curves:
         records.append((f"Within {method.upper()}", rank, value))
     for method, (ranks, curve) in internal_ev.items():
         ev_records.extend((f"Within {method.upper()}", int(rank), float(value))
                           for rank, value in zip(ranks, curve))
+    for method, (ranks, curve) in (internal_ev_raw or {}).items():
+        raw_records.extend((f"Within {method.upper()}", int(rank), float(value))
+                           for rank, value in zip(ranks, curve))
     required = {"Within RRR", "Within PCA", "Transfer RRR", "Transfer PCA"}
     frame = pd.DataFrame(records, columns=["method", "rank", "correlation"])
     if not required.issubset(frame["method"]):
@@ -420,6 +494,9 @@ def _cross_one(results_root, target, source, model, layer, internal_curves,
     frame = frame.groupby(["method", "rank"], as_index=False)["fisher_z"].mean()
     frame["correlation"] = np.tanh(frame.pop("fisher_z"))
     ev_frame = pd.DataFrame(ev_records, columns=["method", "rank", "explained_variance"])
+    if raw is not None and raw_records:
+        raw["ev_frame"] = pd.DataFrame(raw_records,
+                                       columns=["method", "rank", "explained_variance"])
     return frame, ev_frame
 
 
@@ -511,7 +588,7 @@ def load_electrode_curves(results_root, dataset, model, layer, lag_summary="mean
     return pd.concat(frames, ignore_index=True)
 
 
-def load_shuffled_internal_data(results_root, lag_summary="mean", fmri_noise_normalized=True):
+def load_shuffled_internal_data(results_root, lag_summary="mean"):
     """Explained-variance internal RRR inputs from the shuffled-embedding null control.
 
     Reads `results/run_rrr_shuffled/` (internal mode only) and returns
@@ -526,8 +603,7 @@ def load_shuffled_internal_data(results_root, lag_summary="mean", fmri_noise_nor
             identity = (dataset, model, layer)
             try:
                 _, _, internal_ev, _, full_ev, _ = _internal_one(
-                    results_root, *identity, lag_summary, fmri_noise_normalized,
-                    shuffled_embeddings=True)
+                    results_root, *identity, lag_summary, shuffled_embeddings=True)
             except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError) as error:
                 gaps.append(f"shuffled internal {identity}: {error}")
                 continue
@@ -550,7 +626,7 @@ def load_shuffled_internal_data(results_root, lag_summary="mean", fmri_noise_nor
     return data, gaps
 
 
-def load_final_data(results_root, lag_summary="mean", fmri_noise_normalized=True):
+def load_final_data(results_root, lag_summary="mean"):
     """Eagerly load all requested figures' inputs and return separate plain values.
 
     Returns (internal, loso, cross, quantiles, loso_quantiles, full_rows,
@@ -565,33 +641,44 @@ def load_final_data(results_root, lag_summary="mean", fmri_noise_normalized=True
     pair. fMRI and decoding results are unaffected.
 
     fMRI explained variance is the fraction of explainable variance, r^2 / CC_max^2 per
-    voxel, unless `fmri_noise_normalized=False` (raw r^2, for the appendix); the cache is
-    kept separately for each setting. Correlation-mode inputs are never normalized.
+    voxel. The raw-r^2 version for the appendix (`explained_variance.raw_fmri`, fMRI only) is
+    computed in the same pass from the same loaded results. Correlation-mode inputs are never
+    normalized.
     """
     if lag_summary not in LAG_SUMMARIES:
         raise ValueError(f"lag_summary must be one of {LAG_SUMMARIES}, got {lag_summary!r}")
     results_root = Path(results_root)
     suffix = ("" if lag_summary == "mean" else f"_{lag_summary}")
-    suffix += "" if fmri_noise_normalized else "_raw_fmri"
     cache_path = results_root / f".final_plots_cache{suffix}.pkl"
     fingerprint = _cache_fingerprint(results_root, lag_summary + suffix)
-    cached = _read_cache(cache_path, fingerprint)
-    if cached is not None:
-        return cached
+    products_path, products_fingerprint = _products_cache(results_root)
+    # The summaries and the per-result products come from one read of every result, so both
+    # caches must be valid to skip the scan.
+    if _cache_valid(products_path, products_fingerprint):
+        cached = _read_cache(cache_path, fingerprint)
+        if cached is not None:
+            return cached
+    pair_products = {}
+    region_indexer = _region_indexer(results_root)
     internal_rows, loso_rows, cross_rows, full_rows = [], [], [], []
     ev_internal_rows, ev_loso_rows, ev_cross_rows, ev_full_rows = [], [], [], []
     quantiles, loso_quantiles, significant, gaps = {}, {}, {}, []
     ev_curves, ev_loso_curves = {}, {}
+    raw_curves, raw_loso_curves = {}, {}
+    raw_internal_rows, raw_loso_rows, raw_cross_rows, raw_full_rows = [], [], [], []
     for dataset in DATASETS:
         for model, layer in PAIRS:
             identity = (dataset, model, layer)
             subject_curves, subject_quantiles, subject_ev = [], {}, {}
             curves, internal_ev = [], {}
+            internal_raw, internal_products = {}, {}
             try:
                 (curves, matrices, internal_ev, full, full_ev,
                  (subject_curves, subject_quantiles, subject_ev)) = _internal_one(
-                    results_root, *identity, lag_summary, fmri_noise_normalized
+                    results_root, *identity, lag_summary, raw=internal_raw,
+                    products=internal_products, region_indexer=region_indexer
                 )
+                pair_products[identity] = {"internal": internal_products, "cross": {}}
                 quantiles.update({(*identity, method): value for method, value in matrices.items()})
                 internal_rows.extend((dataset, model, layer, *row) for row in curves)
                 ev_curves.update({(*identity, method): (ranks, curve[:, None])
@@ -605,12 +692,22 @@ def load_final_data(results_root, lag_summary="mean", fmri_noise_normalized=True
                     full_rows.append((dataset, model, layer, full))
                 if np.isfinite(full_ev):
                     ev_full_rows.append((dataset, model, layer, full_ev))
+                if internal_raw:
+                    raw_curves.update({(*identity, method): (ranks, curve[:, None])
+                                       for method, (ranks, curve) in internal_raw["ev"].items()})
+                    raw_internal_rows.extend(
+                        (dataset, model, layer, method, int(rank), float(value))
+                        for method, (ranks, curve) in internal_raw["ev"].items()
+                        for rank, value in zip(ranks, curve))
+                    if np.isfinite(internal_raw["full_ev"]):
+                        raw_full_rows.append((dataset, model, layer, internal_raw["full_ev"]))
             except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError) as error:
                 gaps.append(f"internal {identity}: {error}")
-                curves, internal_ev = [], {}
+                curves, internal_ev, internal_raw = [], {}, {}
             try:
+                loso_raw = {}
                 values, matrices, loso_ev = _loso_one(results_root, *identity, lag_summary,
-                                                  fmri_noise_normalized)
+                                                      raw=loso_raw)
                 transfer_subjects = {subject for subject, method, _, _ in values
                                      if method == "RRR transfer"}
                 pca_subjects = {subject for subject, method, _, _ in values
@@ -627,6 +724,18 @@ def load_final_data(results_root, lag_summary="mean", fmri_noise_normalized=True
                            if key[0] in matched_subjects}
                 loso_ev.update({key: value for key, value in subject_ev.items()
                                 if key[0] in matched_subjects})
+                if loso_raw:
+                    loso_raw_ev = {key: value for key, value in loso_raw["ev"].items()
+                                   if key[0] in matched_subjects}
+                    loso_raw_ev.update({key: value for key, value in
+                                        internal_raw.get("subject_ev", {}).items()
+                                        if key[0] in matched_subjects})
+                    raw_loso_curves.update({(*identity, *key): (ranks, curve[:, None])
+                                            for key, (ranks, curve) in loso_raw_ev.items()})
+                    raw_loso_rows.extend(
+                        (dataset, model, layer, subject, method, int(rank), float(value))
+                        for (subject, method), (ranks, curve) in loso_raw_ev.items()
+                        for rank, value in zip(ranks, curve))
                 loso_quantiles.update({(*identity, *key): value for key, value in matrices.items()})
                 loso_rows.extend((dataset, model, layer, *row) for row in values)
                 ev_loso_curves.update({(*identity, *key): (ranks, curve[:, None])
@@ -646,10 +755,18 @@ def load_final_data(results_root, lag_summary="mean", fmri_noise_normalized=True
                 if source == dataset:
                     continue
                 try:
+                    cross_raw, cross_products = {}, {}
                     frame, ev_frame = _cross_one(
                         results_root, dataset, source, model, layer, curves, internal_ev,
-                        lag_summary, fmri_noise_normalized,
+                        lag_summary, internal_raw.get("ev"), cross_raw, cross_products,
                     )
+                    if identity in pair_products:
+                        pair_products[identity]["cross"][source] = cross_products
+                    if "ev_frame" in cross_raw:
+                        raw_frame = cross_raw["ev_frame"]
+                        raw_frame["target_dataset"], raw_frame["source_dataset"] = dataset, source
+                        raw_frame["model"], raw_frame["layer"] = model, layer
+                        raw_cross_rows.append(raw_frame)
                     for table in (frame, ev_frame):
                         table["target_dataset"], table["source_dataset"] = dataset, source
                         table["model"], table["layer"] = model, layer
@@ -671,9 +788,72 @@ def load_final_data(results_root, lag_summary="mean", fmri_noise_normalized=True
             columns=["method", "rank", "explained_variance", "target_dataset",
                      "source_dataset", "model", "layer"]),
         curves=ev_curves, loso_curves=ev_loso_curves, full_rows=ev_full_rows,
+        raw_fmri=ExplainedVarianceData(
+            internal=pd.DataFrame(raw_internal_rows, columns=[
+                "dataset", "model", "layer", "method", "rank", "explained_variance"]),
+            loso=pd.DataFrame(raw_loso_rows, columns=[
+                "dataset", "model", "layer", "subject", "method", "rank", "explained_variance"]),
+            cross=pd.concat(raw_cross_rows, ignore_index=True) if raw_cross_rows else pd.DataFrame(
+                columns=["method", "rank", "explained_variance", "target_dataset",
+                         "source_dataset", "model", "layer"]),
+            curves=raw_curves, loso_curves=raw_loso_curves, full_rows=raw_full_rows),
     )
     decoding = _decoding_summaries(results_root)
     result = (internal, loso, cross, quantiles, loso_quantiles, full_rows,
               significant, decoding, gaps, explained_variance)
     _write_cache(cache_path, fingerprint, result)
+    _write_cache(products_path, products_fingerprint, pair_products)
     return result
+
+
+def load_pair_products(results_root):
+    """Per-result products of every (dataset, model, layer), from the same read as the summaries.
+
+    `{(dataset, model, layer): {"internal": {method: products}, "cross": {source: {method:
+    products}}}}` with `final_products.result_products` values: cluster sums for the bootstrap
+    intervals, ROI sums and curves, and per-lag sums. Cached beside `load_final_data`'s cache
+    (which also fills it); the first call without a cache reads every result once.
+    """
+    results_root = Path(results_root)
+    path, fingerprint = _products_cache(results_root)
+    products = _read_cache(path, fingerprint)
+    if products is None:
+        load_final_data(results_root)
+        products = _read_cache(path, fingerprint)
+    return {} if products is None else products
+
+
+def _products_cache(results_root):
+    return (results_root / ".final_plots_products.pkl",
+            _cache_fingerprint(results_root, "products"))
+
+
+def _cache_valid(path, fingerprint):
+    try:
+        with path.open("rb") as handle:
+            return handle.read(len(fingerprint)) == fingerprint.encode()
+    except OSError:
+        return False
+
+
+def _region_indexer(results_root):
+    """`(dataset, targets) -> {region: target indices}` over the bihemispheric ROIs.
+
+    The atlas lookup is shared across model layers (`target_atlas_labels`). Datasets whose raw
+    data or atlas are unavailable give None (no ROI products), as when results are missing.
+    """
+    from src.utils.atlas.core import bihemispheric_region_groups
+
+    data = Path(results_root).parent / "data"
+    roots = {"podcast": data, "cars-2": data / "brain-treebank", "fmri": data / "deep-fMRI-dataset"}
+    groups = bihemispheric_region_groups()
+
+    def indexer(dataset, targets):
+        try:
+            labels = target_atlas_labels(dataset, targets, roots[dataset])
+        except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError):
+            return None
+        return {region: np.flatnonzero(np.isin(labels, list(members)))
+                for region, members in groups.items()}
+
+    return indexer

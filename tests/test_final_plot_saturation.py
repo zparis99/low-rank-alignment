@@ -262,3 +262,138 @@ def test_explained_variance_figures_use_explained_variance_tables():
     with pytest.raises(ValueError):
         rrr_aggregate(internal, loso, curves, loso_curves, full_rows, ('gpt2', 0),
                       saturation_mode='nonsense')
+
+
+def test_fmri_only_figures_draw_only_fmri_panels():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from src.utils.plotting.final_figures import cross_aggregate, rrr_aggregate
+
+    ranks = np.array([1, 4, 9])
+    values = [.001, .004, .005]
+    curves = {('fmri', 'gpt2', 0, method): (ranks, np.array([[v] for v in values]))
+              for method in ('rrr', 'pca')}
+    loso_curves = {('fmri', 'gpt2', 0, subject, method): (ranks, np.array([[v] for v in values]))
+                   for subject in ('a', 'b')
+                   for method in ('RRR baseline', 'RRR transfer', 'PCA baseline')}
+    internal = pd.DataFrame([('fmri', 'gpt2', 0, method, int(rank), v)
+                             for method in ('rrr', 'pca') for rank, v in zip(ranks, values)],
+                            columns=['dataset', 'model', 'layer', 'method', 'rank',
+                                     'explained_variance'])
+    loso = pd.DataFrame([('fmri', 'gpt2', 0, subject, method, int(rank), v)
+                         for subject in ('a', 'b')
+                         for method in ('RRR baseline', 'RRR transfer', 'PCA baseline')
+                         for rank, v in zip(ranks, values)],
+                        columns=['dataset', 'model', 'layer', 'subject', 'method', 'rank',
+                                 'explained_variance'])
+    for mode in ('internal', 'loso'):
+        for distributions_only in (False, True):
+            figure = rrr_aggregate(internal, loso, curves, loso_curves, [('fmri', 'gpt2', 0, .006)],
+                                   ('gpt2', 0), mode=mode, saturation_mode='explained_variance',
+                                   datasets=('fmri',), fmri_noise_normalized=False,
+                                   distributions_only=distributions_only)
+            titles = {ax.get_title() for ax in figure.axes}
+            assert 'Moth (fMRI)' in titles
+            assert not titles & {'Podcast (ECoG)', 'Cars 2 (sEEG)'}
+            plt.close(figure)
+    cross = pd.DataFrame([
+        (method, int(rank), v, 'fmri', source, 'gpt2', 0)
+        for source in ('podcast', 'cars-2')
+        for method in ('Within RRR', 'Within PCA', 'Transfer RRR', 'Transfer PCA')
+        for rank, v in zip(ranks, values)
+    ], columns=['method', 'rank', 'explained_variance', 'target_dataset', 'source_dataset',
+                'model', 'layer'])
+    for distributions_only in (False, True):
+        figure = cross_aggregate(cross, 'explained_variance', targets=('fmri',),
+                                 distributions_only=distributions_only)
+        assert not any('→ Podcast' in ax.get_title() or '→ Cars' in ax.get_title()
+                       for ax in figure.axes)
+        plt.close(figure)
+
+
+def test_raw_fmri_curves_come_from_the_same_summary():
+    from src.utils.plotting.final_data import _summarize
+
+    rng = np.random.default_rng(0)
+    values = rng.uniform(.1, .5, size=(3, 2, 4, 1))  # [rank, fold, target, lag]
+    scale = np.array([.25, .5, 1.0, 2.0])
+    scaled = _summarize(values, [1, 2, 4], "mean", scale)
+    plain = _summarize(values, [1, 2, 4], "mean", None)
+    assert plain["ev_raw"] is None
+    np.testing.assert_allclose(scaled["ev_raw"], plain["ev"])
+    assert not np.allclose(scaled["ev"], scaled["ev_raw"])
+
+
+def test_bootstrap_intervals_come_from_products_without_reading_results():
+    from src.utils.plotting import final_bootstrap as bootstrap
+    from src.utils.plotting.final_products import result_products
+
+    ranks = np.array([1., 2., 4., 8.])
+    rng = np.random.default_rng(0)
+    products = {}
+    for dataset in ("podcast", "cars-2", "fmri"):
+        targets = pd.DataFrame({"subject": [str(i % 6) for i in range(12)],
+                                "electrode": [f"A{i}" for i in range(12)]})
+        per_pair = rng.uniform(0, 1, size=(4, 12, 1)) * np.array([.1, .5, .9, 1.0])[:, None, None]
+        scale = np.full(12, 2.0) if dataset == "fmri" else None
+        entry = result_products(dataset, ranks, per_pair, scale, targets)
+        products[(dataset, "gpt2", 0)] = {
+            "internal": {"rrr": entry, "pca": entry},
+            "cross": {source: {"rrr": entry, "pca": entry}
+                      for source in ("podcast", "cars-2", "fmri") if source != dataset}}
+    result = bootstrap.internal_intervals(products, [("gpt2", [0])])
+    assert {key[0] for key in result["raw_fmri"]} == {"fmri"}
+    assert {key[0] for key in result["normalized"]} == {"podcast", "cars-2", "fmri"}
+    auc = bootstrap.auc_intervals(products, [("gpt2", [0])])
+    assert {key[0] for key in auc["raw_fmri"]} == {"fmri"}
+    assert len(auc["normalized"]) == 6 * 3  # six directed pairs x three comparisons
+
+
+def test_result_products_match_direct_computation():
+    from src.utils.plotting.final_products import result_products, squared_variants
+    from src.utils.rrr.plot_metrics import explained_variance_curve
+
+    rng = np.random.default_rng(1)
+    per_pair = rng.uniform(-.2, .8, size=(3, 8, 2))
+    scale = np.array([.5, 1, 2, 1, 1, np.nan, 1, 4.])
+    targets = pd.DataFrame({"subject": list("aabbccdd")})
+    region_index = {"IFG": np.array([0, 1, 2]), "empty": np.array([], dtype=int)}
+    products = result_products("fmri", [1, 2, 4], per_pair, scale, targets,
+                               region_index=region_index)
+    sums, counts, _ = products["clusters"]["normalized"]
+    np.testing.assert_allclose(
+        sums.sum(axis=0) / counts.sum(axis=0),
+        explained_variance_curve(per_pair, scale=scale[:, None]))
+    np.testing.assert_allclose(
+        products["roi_curves"]["raw_fmri"]["IFG"],
+        explained_variance_curve(per_pair[:, [0, 1, 2], :]))
+    assert set(products["roi"]["normalized"]) == {"IFG"}  # regions without targets are skipped
+    assert products["roi_counts"] == {"IFG": 3, "empty": 0}
+    assert set(squared_variants(per_pair, None)) == {"normalized"}
+
+
+def test_atlas_labels_are_looked_up_once_per_distinct_target_table(monkeypatch):
+    from src.utils.plotting import final_data
+
+    calls = []
+
+    class Adapter:
+        def get_electrode_coordinates(self, targets, root):
+            calls.append("coordinates")
+            return np.zeros((len(targets), 3))
+
+        def get_target_atlas_labels(self, targets, root):
+            calls.append("labels")
+            return np.array(["IFG"] * len(targets))
+
+    monkeypatch.setattr("src.core.registry.get_dataset_adapter", lambda name: Adapter())
+    monkeypatch.setattr(final_data, "_ATLAS_LABELS", {})
+    first = pd.DataFrame({"subject": ["1", "1"], "electrode": ["a", "b"]})
+    again = first.copy()
+    other = pd.DataFrame({"subject": ["1", "2"], "electrode": ["a", "b"]})
+    final_data.target_atlas_labels("podcast", first, "root")
+    final_data.target_atlas_labels("podcast", again, "root")
+    assert calls == ["coordinates", "labels"]
+    final_data.target_atlas_labels("podcast", other, "root")
+    assert calls == ["coordinates", "labels"] * 2

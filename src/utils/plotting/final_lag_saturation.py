@@ -13,12 +13,9 @@ import matplotlib.pyplot as plt
 
 from src.utils.plotting.final_axes import MODEL_COLORS, MODEL_NAMES, finish_axis, paper_style
 from src.utils.plotting.final_data import (
-    LABELS, PAIRS, _cache_fingerprint, _fisher, _lagged, _load_matrix, _manifest_for,
-    _metric_name, _read_cache, _rrr, _write_cache,
+    LABELS, PAIRS, _cache_fingerprint, _read_cache, _write_cache, load_pair_products,
 )
-from src.utils.plotting.final_bootstrap import (
-    FRACTION, LEVEL, N_BOOT, bootstrap_counts, cluster_labels, squared_correlations,
-)
+from src.utils.plotting.final_bootstrap import FRACTION, LEVEL, N_BOOT, bootstrap_counts
 from src.utils.rrr.plot_metrics import (
     explained_variance_curve, explained_variance_saturation_rank, model_sign_flip,
 )
@@ -29,23 +26,16 @@ METHOD_LABELS = {"rrr": "RRR", "pca": "PCA"}
 CACHE_NAME = ".final_lag_saturation_cache.pkl"
 
 
-def _lag_saturation_one(results_root, dataset, model, layer, method, fraction):
-    artifact = _rrr(results_root, "internal", dataset, model, layer).load_artifacts(
-        ["target_manifest", "rank_metrics"])
-    matrix = _load_matrix(artifact, method, _metric_name(dataset, method))
-    if matrix is None:
+def _lag_saturation_one(entry, fraction):
+    """(lags, saturation rank per lag) of one method's products (None without per-lag sums)."""
+    if entry is None or entry["lags"] is None:
         return None
-    manifest = _manifest_for(artifact, {"method": method})
-    lags = np.sort(manifest["lag"].unique())
-    # [rank, electrode, lag]; the matrix lag axis follows `lag_index`, which is time ordered.
-    per_target = _fisher(_lagged(matrix), axis=1)
-    if per_target.shape[2] != len(lags):
-        raise ValueError("lag axis does not match the target manifest")
+    lags, sums, counts, _ = entry["lags"]
+    with np.errstate(all="ignore"):  # pooled over all electrodes of every cluster at each lag
+        curves = sums.sum(axis=0) / counts.sum(axis=0)  # [rank, lag]
     saturation = np.array([
-        explained_variance_saturation_rank(
-            matrix.ranks, explained_variance_curve(per_target[:, :, index]), fraction)
-        for index in range(len(lags))
-    ])
+        explained_variance_saturation_rank(entry["ranks"], curves[:, index], fraction)
+        for index in range(len(lags))])
     return lags, saturation
 
 
@@ -57,13 +47,12 @@ def load_lag_saturation(results_root, fraction=0.99):
     if cached is not None:
         return cached
     result = {}
+    products = load_pair_products(results_root)
     for dataset in IEEG_DATASETS:
         for model, layer in PAIRS:
+            internal = products.get((dataset, model, layer), {}).get("internal", {})
             for method in METHODS:
-                try:
-                    found = _lag_saturation_one(results_root, dataset, model, layer, method, fraction)
-                except (FileNotFoundError, ValueError):
-                    continue
+                found = _lag_saturation_one(internal.get(method), fraction)
                 if found is not None:
                     result[(dataset, model, layer, method)] = found
     _write_cache(path, fingerprint, result)
@@ -86,13 +75,6 @@ def _log2_saturation(ranks, curves, fraction=FRACTION):
         return np.where(peak > 0, np.log2(saturation), np.nan)
 
 
-def _lag_cluster_sums(squared, labels):
-    names = sorted(set(labels))
-    sums = np.stack([np.nansum(squared[:, labels == name, :], axis=1) for name in names])
-    counts = np.stack([np.isfinite(squared[:, labels == name, :]).sum(axis=1) for name in names])
-    return sums, counts, names  # [cluster, rank, lag]
-
-
 def load_lag_saturation_intervals(results_root, exclude_models=(), n_boot=N_BOOT):
     """{(dataset, method): (lags, low, high)} bootstrap interval of the mean log2 saturation rank.
 
@@ -109,21 +91,21 @@ def load_lag_saturation_intervals(results_root, exclude_models=(), n_boot=N_BOOT
     if cached is not None:
         return cached
     result = {}
+    products = load_pair_products(results_root)
     for dataset in IEEG_DATASETS:
         multiplicity, expected = None, None
         totals = {method: None for method in METHODS}
+        lags = None
         for model, layer in PAIRS:
             if model in exclude_models:
                 continue
+            internal = products.get((dataset, model, layer), {}).get("internal", {})
             for method in METHODS:
-                try:
-                    loaded = squared_correlations(results_root, dataset, model, layer, method)
-                except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError):
+                entry = internal.get(method)
+                if entry is None or entry["lags"] is None:
                     continue
-                if loaded is None:
-                    continue
-                ranks, squared, targets = loaded
-                sums, counts, names = _lag_cluster_sums(squared, cluster_labels(dataset, targets))
+                ranks = entry["ranks"]
+                lags, sums, counts, names = entry["lags"]
                 if multiplicity is None or names != expected:
                     expected, multiplicity = names, bootstrap_counts(len(names), n_boot)
                 n_rank, n_lag = sums.shape[1:]
@@ -137,17 +119,12 @@ def load_lag_saturation_intervals(results_root, exclude_models=(), n_boot=N_BOOT
                     totals[method] = [np.zeros_like(log_rank), np.zeros(log_rank.shape)]
                 totals[method][0] += np.where(finite, log_rank, 0)
                 totals[method][1] += finite
-        lags = None
         for method, accumulated in totals.items():
             if accumulated is None:
                 continue
             with np.errstate(all="ignore"):
                 mean = accumulated[0] / np.where(accumulated[1] > 0, accumulated[1], np.nan)
             low, high = np.nanpercentile(mean, [(100 - LEVEL) / 2, 100 - (100 - LEVEL) / 2], axis=0)
-            if lags is None:
-                lags = np.sort(_manifest_for(
-                    _rrr(results_root, "internal", dataset, "gpt2", 0).load_artifacts(["target_manifest"]),
-                    {"method": method})["lag"].unique())
             result[(dataset, method)] = (lags, 2 ** low, 2 ** high)
     _write_cache(path, fingerprint, result)
     return result

@@ -121,16 +121,17 @@ def _(loso_quantiles, mo):
 
 
 @app.cell(hide_code=True)
-def _(explained_variance, repo_root, results_root, roi_names, subspace_data):
+def _(explained_variance, results_root, subspace_data):
     from src.utils.plotting.final_bootstrap import interval_tables
 
-    # Computed (and cached) on first use. Subjects are resampled (Cars 2: depth probes); tables for
-    # saturation ranks (internal, LOSO), cross-dataset AUC differences, and per-ROI saturation ranks.
+    # Computed (and cached) on first use from the per-result products of the single read behind
+    # `load_final_data`. Subjects are resampled (Cars 2: depth probes); tables for saturation ranks
+    # (internal, LOSO), cross-dataset AUC differences, and per-ROI saturation ranks.
+    # `model_cis["raw_fmri"]` holds the fMRI-only raw-r^2 intervals of the appendix.
     model_cis = interval_tables(
         results_root, explained_variance.loso_curves, subspace_data.MODEL_LAYER_LIST,
-        {"podcast": repo_root / "data", "cars-2": repo_root / "data" / "brain-treebank",
-         "fmri": repo_root / "data" / "deep-fMRI-dataset"}, roi_names)
-    return interval_tables, model_cis
+        raw_loso_curves=explained_variance.raw_fmri.loso_curves)
+    return (model_cis,)
 
 
 @app.cell(hide_code=True)
@@ -635,19 +636,17 @@ def _(mo):
 
 
 @app.cell
-def _(repo_root, results_root, subspace_data):
+def _(results_root):
     from src.utils.atlas.core import bihemispheric_region_groups
-    from src.utils.plotting.roi_saturation import load_roi_curves
+    from src.utils.plotting.final_data import load_pair_products
+    from src.utils.plotting.roi_saturation import roi_curve_tables
 
     roi_names = list(bihemispheric_region_groups())
-    _data = repo_root / "data"
-    roi_curves, roi_counts, roi_gaps = subspace_data.cached(
-        results_root, "roi_curves",
-        lambda: load_roi_curves(
-            results_root,
-            {"podcast": _data, "cars-2": _data / "brain-treebank", "fmri": _data / "deep-fMRI-dataset"},
-            regions=roi_names))
-    return load_roi_curves, roi_counts, roi_curves, roi_gaps, roi_names
+    # Derived from the per-result products of the single read behind `load_final_data`; the same
+    # pass gives the main curves and the raw-fMRI-r^2 curves of the appendix.
+    roi_curves, roi_curves_raw, roi_counts, roi_gaps = roi_curve_tables(
+        load_pair_products(results_root), roi_names)
+    return roi_counts, roi_curves, roi_curves_raw, roi_gaps, roi_names
 
 
 @app.cell
@@ -768,50 +767,31 @@ def _(mo):
 
     The main figures report fMRI explained variance as a fraction of the explainable variance
     ($r^2 / CC_{max}^2$ per voxel). Here the main analyses are repeated with raw $r^2$ for fMRI, to show
-    that the conclusions do not depend on the normalization. Podcast (ECoG) and Cars 2 (sEEG) are identical to the
-    main figures, and random GPT-2 is left out as there.
+    that the conclusions do not depend on the normalization. Only the fMRI results are shown (the iEEG results are
+    identical to the main figures; the cross-dataset panels are those with fMRI as the target), and random GPT-2 is
+    left out as there.
     """)
     return
-
-
-@app.cell(hide_code=True)
-def _(load_final_data, results_root):
-    explained_variance_raw = load_final_data(results_root, fmri_noise_normalized=False)[9]
-    return (explained_variance_raw,)
-
-
-@app.cell(hide_code=True)
-def _(
-    explained_variance_raw,
-    interval_tables,
-    repo_root,
-    results_root,
-    roi_names,
-    subspace_data,
-):
-    model_cis_raw = interval_tables(
-        results_root, explained_variance_raw.loso_curves, subspace_data.MODEL_LAYER_LIST,
-        {"podcast": repo_root / "data", "cars-2": repo_root / "data" / "brain-treebank",
-         "fmri": repo_root / "data" / "deep-fMRI-dataset"}, roi_names, fmri_noise_normalized=False)
-    return (model_cis_raw,)
 
 
 @app.cell(hide_code=True)
 def _(
     MAIN_EXCLUDED,
     cross_aggregate,
-    explained_variance_raw,
+    explained_variance,
     loso_pair,
     mo,
-    model_cis_raw,
+    model_cis,
     model_colors_on,
     rrr_aggregate,
     selected_pair,
     without_models,
 ):
     model_colors_on  # redraw when the point-color toggle changes
-    _raw = without_models(explained_variance_raw, MAIN_EXCLUDED)
-    _cis = lambda mode: None if model_cis_raw is None else model_cis_raw[mode]
+    # fMRI only: raw r^2 computed from the same loaded results as the main figures.
+    _raw = without_models(explained_variance.raw_fmri, MAIN_EXCLUDED)
+    _cis = lambda mode: None if model_cis is None else model_cis["raw_fmri"][mode]
+    _only_fmri = {"datasets": ("fmri",), "fmri_noise_normalized": False}
     if selected_pair.value is None:
         _raw_figures = mo.md("No internal RRR curves are available.")
     else:
@@ -820,7 +800,7 @@ def _(
             rrr_aggregate(_raw.internal, _raw.loso, _raw.curves, _raw.loso_curves,
                           _raw.full_rows, selected_pair.value, mode="internal",
                           saturation_mode="explained_variance", intervals=_cis("internal"),
-                          fmri_noise_normalized=False),
+                          **_only_fmri),
         ]
         if loso_pair.value is not None:
             _figures.extend([
@@ -828,11 +808,12 @@ def _(
                 rrr_aggregate(_raw.internal, _raw.loso, _raw.curves, _raw.loso_curves,
                               _raw.full_rows, loso_pair.value, mode="loso",
                               saturation_mode="explained_variance", intervals=_cis("loso"),
-                              fmri_noise_normalized=False),
+                              **_only_fmri),
             ])
         _figures.extend([
             mo.md("## Directed cross-dataset RRR aggregate (raw fMRI r\u00b2)"),
-            cross_aggregate(_raw.cross, "explained_variance", intervals=_cis("auc")),
+            cross_aggregate(_raw.cross, "explained_variance", intervals=_cis("auc"),
+                            targets=("fmri",)),
         ])
         _raw_figures = mo.vstack(_figures)
     _raw_figures
@@ -840,24 +821,12 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(load_roi_curves, repo_root, results_root, roi_names, subspace_data):
-    _data = repo_root / "data"
-    roi_curves_raw, roi_counts_raw, _roi_gaps_raw = subspace_data.cached(
-        results_root, "roi_curves_raw_fmri",
-        lambda: load_roi_curves(
-            results_root,
-            {"podcast": _data, "cars-2": _data / "brain-treebank", "fmri": _data / "deep-fMRI-dataset"},
-            regions=roi_names, fmri_noise_normalized=False))
-    return roi_counts_raw, roi_curves_raw
-
-
-@app.cell(hide_code=True)
 def _(
     MAIN_EXCLUDED,
     mo,
-    model_cis_raw,
+    model_cis,
     model_colors_on,
-    roi_counts_raw,
+    roi_counts,
     roi_curves_raw,
     roi_names,
     roi_normalized_curves,
@@ -868,10 +837,11 @@ def _(
     _main_raw = without_models(roi_curves_raw, MAIN_EXCLUDED, index=2)
     mo.vstack([
         mo.md("## Normalized mean explained variance by ROI (raw fMRI r\u00b2)"),
-        roi_normalized_curves(_main_raw, roi_counts_raw, roi_names),
+        roi_normalized_curves(_main_raw, roi_counts, roi_names, datasets=("fmri",)),
         mo.md("## Saturation rank by ROI (raw fMRI r\u00b2)"),
-        roi_saturation_distributions(_main_raw, roi_names, roi_counts_raw,
-                                     intervals=None if model_cis_raw is None else model_cis_raw["roi"]),
+        roi_saturation_distributions(
+            _main_raw, roi_names, roi_counts, datasets=("fmri",),
+            intervals=None if model_cis is None else model_cis["raw_fmri"]["roi"]),
     ])
     return
 

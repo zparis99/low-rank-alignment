@@ -59,6 +59,8 @@ def without_models(data, models, *, index=1):
     at position `index` (default 1: `(dataset, model, ...)`), a list of such tuples, or a
     NamedTuple of those (for example `ExplainedVarianceData`).
     """
+    if data is None:
+        return None
     models = set(models)
     if hasattr(data, "_fields"):
         return data._replace(**{name: without_models(getattr(data, name), models, index=index)
@@ -217,8 +219,8 @@ def _loso_saturation_values(quantiles, dataset, fraction, saturation_mode="quant
 def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                   selected_pair, *, mode="internal", fraction=.99,
                   saturation_mode="quantile", separate_model=None, distributions_only=False,
-                  intervals=None, fmri_noise_normalized=True):
-    """Two stacked curve columns beside three full-height rank distributions.
+                  intervals=None, fmri_noise_normalized=True, datasets=tuple(DATASETS)):
+    """Two stacked curve columns beside the full-height rank distributions (one per dataset).
 
     With `saturation_mode="explained_variance"`, pass the explained-variance tables:
     `internal`/`loso` frames, the `curves`/`loso_curves` dictionaries in place of the
@@ -229,28 +231,32 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
     `without_models`). `distributions_only` draws just the saturation distributions (panel C).
     `intervals` maps `(dataset, model, method)` to a bootstrap interval in log2 saturation rank;
     it is drawn as a whisker through each model-mean square. `fmri_noise_normalized` only
-    labels the fMRI sample-curve panel (pass False for the raw-r^2 appendix data).
+    labels the fMRI sample-curve panel (pass False for the raw-r^2 appendix data). `datasets`
+    restricts the figure to those datasets (one row of curves and one distribution each).
     """
     settings = _mode(saturation_mode)
+    count = len(datasets)
     with paper_style():
         if distributions_only:
+            width = 19 if separate_model is not None and mode == 'loso' else 14
             figure, distribution_axes = plt.subplots(
-                1, len(DATASETS), sharey=True,
-                figsize=(19 if separate_model is not None and mode == 'loso' else 14, 6.6))
+                1, count, sharey=True, squeeze=False,
+                figsize=(width if count == len(DATASETS) else max(6.5, width * count / 3), 6.6))
+            distribution_axes = distribution_axes[0]
         else:
-            figure = plt.figure(figsize=(19, 7.4))
+            figure = plt.figure(figsize=(19, 7.4 if count == len(DATASETS) else 4.6))
             grid = figure.add_gridspec(
-                3, 3, width_ratios=[1.25, 1.25, 3],
+                count, 3, width_ratios=[1.25, 1.25, 3],
                 hspace=.52, wspace=.35,
             )
-            saturation_grid = grid[:, 2].subgridspec(1, 3, wspace=.10)
+            saturation_grid = grid[:, 2].subgridspec(1, count, wspace=.10)
         source = internal if mode == "internal" else loso
         methods = ["rrr", "pca"] if mode == "internal" else [
             "RRR baseline", "RRR transfer", "PCA baseline"]
         average = fisher_mean if saturation_mode == "quantile" else np.nanmean
         baseline_map = {(d, m, l): float(average(v)) for d, m, l, v in full_rows}
         first_saturation_ax = None
-        for row, dataset in enumerate(DATASETS):
+        for row, dataset in enumerate(datasets):
             frame = source[source["dataset"] == dataset]
             sample = _pair_rows(frame, *selected_pair)
             sample_curves = _curves(sample, saturation_mode)
@@ -285,9 +291,9 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                 if row == 0:
                     sample_ax.legend(frameon=False, ncol=2, fontsize=9,
                                      handlelength=1.2, columnspacing=.7)
-                if row != 2:
+                if row != count - 1:
                     sample_ax.set_xlabel("")
-                if row != 1:
+                if row != count // 2:
                     sample_ax.set_ylabel("")
                 mean_ax = figure.add_subplot(grid[row, 1])
                 normalized_curve_axis(mean_ax, _members(frame, saturation_mode))
@@ -296,9 +302,9 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                     mean_ax.legend(frameon=False, ncol=2, fontsize=9,
                                    handlelength=1.2, columnspacing=.7)
                 mean_ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])
-                if row != 2:
+                if row != count - 1:
                     mean_ax.set_xlabel("")
-                if row != 1:
+                if row != count // 2:
                     mean_ax.set_ylabel("")
             distribution_ax = (distribution_axes[row] if distributions_only else
                                figure.add_subplot(saturation_grid[0, row],
@@ -372,8 +378,11 @@ def _cross_auc(frame, saturation_mode="quantile"):
 
 @with_model_legend
 def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
-                    distributions_only=False, intervals=None):
+                    distributions_only=False, intervals=None, targets=tuple(DATASETS)):
     """Six directed panels and the three current normalized-AUC comparisons.
+
+    `targets` keeps only the directed pairs whose target dataset is listed (for example just
+    "fmri": podcast → fmri and cars-2 → fmri).
 
     `separate_model` draws that model's layers as their own AUC-difference violins instead of
     pooling them. `distributions_only` draws just those three distribution panels. `intervals`
@@ -382,14 +391,15 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
 
     For `saturation_mode="explained_variance"` pass the explained-variance cross frame.
     """
+    directed = [(t, s) for t in targets for s in DATASETS if s != t]
     with paper_style():
         if distributions_only:
-            figure = plt.figure(figsize=(12, 12))
+            figure = plt.figure(figsize=(12 if len(directed) > 2 else 7, 12))
             right = figure.add_gridspec(3, 1, hspace=.30)
         else:
             figure = plt.figure(figsize=(21, 10.5))
             grid = figure.add_gridspec(3, 6)
-            left = grid[:, :3].subgridspec(2, 3, hspace=.28, wspace=.10)
+            left = grid[:, :3].subgridspec(2, -(-len(directed) // 2), hspace=.28, wspace=.10)
             right = grid[:, 3:].subgridspec(3, 1, hspace=.30)
         comparisons = [
             ("Within RRR − Transfer RRR", "Within RRR", "Transfer RRR"),
@@ -402,9 +412,7 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
         separate_models = [defaultdict(list) for _ in comparisons]
         first_directed_ax = None
         directions = {}  # direction label -> (target, source)
-        for index, (target, source) in enumerate(
-            (t, s) for t in DATASETS for s in DATASETS if s != t
-        ):
+        for index, (target, source) in enumerate(directed):
             panel = cross[(cross["target_dataset"] == target)
                           & (cross["source_dataset"] == source)]
             if not distributions_only:

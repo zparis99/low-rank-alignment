@@ -5,6 +5,12 @@ the rank reaching 99% of the maximum mean r^2 per target. `--saturation-mode qua
 writes the target-quantile appendix versions into a `quantile/` subfolder. `--all` writes both
 of those plus the raw-fMRI-r^2 appendix (`raw_fmri/` subfolder) in one run.
 
+`--scope` splits any of those exports by where the data lives. `local` writes every figure whose
+inputs are complete in the local `results/` (internal, cross-dataset, significance, encoding, lag,
+ROI, PCA, noise-ceiling); `remote` writes only the figures that need results held on the remote
+host (LOSO, language decoding, the shuffled-embedding control; see `REMOTE_ONLY`). The default
+`all` writes both. Filenames are identical, so the two output folders can be merged.
+
 Like the notebook, every distribution plot colors its points by model and carries the 95%
 bootstrap intervals on saturation ranks (`final_bootstrap.interval_tables`), and the main export
 includes the saturation-rank-by-lag figure.
@@ -17,6 +23,31 @@ from pathlib import Path
 
 
 RANDOM_MODEL = "random-gpt2"
+
+SCOPES = ("all", "local", "remote")
+# Figures that need results which are only on the remote host, per saturation mode: leave-one-
+# subject-out runs (all models, fMRI scalers), the language-decoding runs and the shuffled-embedding
+# control. Every other figure is `local`.
+REMOTE_ONLY = {
+    "explained_variance": frozenset({
+        "rrr_loso_aggregate", "rrr_loso_aggregate_random_gpt2",
+        "loso_saturation_sensitivity_fraction", "language_decoding_aggregate",
+        "rrr_internal_aggregate_shuffled", "subspace_consistency", "loso_principal_angles",
+        "loso_aligned_delta", "loso_saturation_split", "loso_saturation_split_random_gpt2",
+    }),
+    "quantile": frozenset({"rrr_loso_aggregate", "loso_saturation_sensitivity_fraction"}),
+    "raw_fmri": frozenset({"rrr_loso_aggregate"}),
+}
+
+
+def select_jobs(jobs, saturation_mode, scope):
+    """The `(name, build)` jobs of `scope` ("all" keeps every job)."""
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {SCOPES}, got {scope!r}")
+    if scope == "all":
+        return list(jobs)
+    remote = REMOTE_ONLY[saturation_mode]
+    return [job for job in jobs if (job[0] in remote) == (scope == "remote")]
 
 
 def _layer(value):
@@ -46,22 +77,17 @@ def available_pairs(quantiles, *, loso=False):
     )
 
 
-def _data_roots(root):
-    return {"podcast": root / "data", "cars-2": root / "data" / "brain-treebank",
-            "fmri": root / "data" / "deep-fMRI-dataset"}
+def bootstrap_intervals(results_root, explained_variance):
+    """The notebook's `interval_tables` (cached under `results/final_subspace_cache`).
 
-
-def bootstrap_intervals(results_root, explained_variance, *, fmri_noise_normalized=True):
-    """The notebook's `interval_tables` (cached under `results/final_subspace_cache`)."""
-    from src.utils.atlas.core import bihemispheric_region_groups
+    The `raw_fmri` entry holds the fMRI-only raw-r^2 intervals, computed in the same pass.
+    """
     from src.utils.plotting import final_subspace_data as data
     from src.utils.plotting.final_bootstrap import interval_tables
 
-    results_root = Path(results_root)
     return interval_tables(
-        results_root, explained_variance.loso_curves, data.MODEL_LAYER_LIST,
-        _data_roots(results_root.parent), list(bihemispheric_region_groups()),
-        fmri_noise_normalized=fmri_noise_normalized)
+        Path(results_root), explained_variance.loso_curves, data.MODEL_LAYER_LIST,
+        raw_loso_curves=explained_variance.raw_fmri.loso_curves)
 
 
 def lag_saturation(results_root):
@@ -83,7 +109,8 @@ def _subspace_jobs(raw_fmri_only=False, intervals=None):
     """Appendix figures of dimensionality and subspace consistency (same data as the notebook).
 
     Datasets whose results or raw data are missing are drawn as empty panels. With
-    `raw_fmri_only`, only the two ROI figures of the raw-fMRI-r^2 appendix.
+    `raw_fmri_only`, only the two (fMRI-only) ROI figures of the raw-fMRI-r^2 appendix; then
+    `intervals` is the `raw_fmri` entry of `bootstrap_intervals`.
     """
     from src.utils.plotting import final_subspace_data as data
     from src.utils.plotting import final_subspace_figures as figures
@@ -116,19 +143,16 @@ def _subspace_jobs(raw_fmri_only=False, intervals=None):
         return _CACHE["subspace"]
 
     def roi(raw_fmri=False):
+        # Derived from the products of the single read behind the main figures.
         from src.utils.atlas.core import bihemispheric_region_groups
-        from src.utils.plotting.roi_saturation import load_roi_curves
+        from src.utils.plotting.final_data import load_pair_products
+        from src.utils.plotting.roi_saturation import roi_curve_tables
 
-        names, raw = list(bihemispheric_region_groups()), root / "data"
-        key = "roi_raw_fmri" if raw_fmri else "roi"
-        if key not in _CACHE:
-            _CACHE[key] = (names, *data.cached(
-                results, "roi_curves_raw_fmri" if raw_fmri else "roi_curves",
-                lambda: load_roi_curves(
-                    results, {"podcast": raw, "cars-2": raw / "brain-treebank",
-                              "fmri": raw / "deep-fMRI-dataset"}, regions=names,
-                    **({"fmri_noise_normalized": False} if raw_fmri else {}))))
-        return _CACHE[key]
+        names = list(bihemispheric_region_groups())
+        if "roi" not in _CACHE:
+            _CACHE["roi"] = (names, *roi_curve_tables(load_pair_products(results), names))
+        names, curves, raw_curves, counts, gaps = _CACHE["roi"]
+        return (names, raw_curves, counts, gaps) if raw_fmri else (names, curves, counts, gaps)
 
     def roi_figure(name, separate=False, raw_fmri=False):
         from src.utils.plotting import roi_saturation
@@ -138,6 +162,8 @@ def _subspace_jobs(raw_fmri_only=False, intervals=None):
         if not separate:
             curves = without_models(curves, (RANDOM_MODEL,), index=2)
         options = {"separate_model": RANDOM_MODEL} if separate else {}
+        if raw_fmri:
+            options["datasets"] = ("fmri",)
         if name == "normalized":
             return roi_saturation.roi_normalized_curves(curves, counts, names, **options)
         return roi_saturation.roi_saturation_distributions(
@@ -176,20 +202,23 @@ _CACHE = {}
 
 
 def export_figures(data, output_dir, formats, example_pair, loso_pair,
-                   saturation_mode="explained_variance", shuffled=None, intervals=None):
+                   saturation_mode="explained_variance", shuffled=None, intervals=None,
+                   scope="all"):
     """Save and close figures one at a time to keep export memory bounded.
 
     Explained-variance mode writes the main figures plus the figures that do not
     depend on the saturation mode (decoding, encoding, significance, gaps) to
     `output_dir`. Quantile mode writes its appendix figures to `output_dir/quantile`.
-    `saturation_mode="raw_fmri"` (data loaded with `fmri_noise_normalized=False`) writes the
-    raw-fMRI-r^2 appendix to `output_dir/raw_fmri`. `shuffled` is the
+    `saturation_mode="raw_fmri"` writes the fMRI-only raw-r^2 appendix (`data[9].raw_fmri`,
+    computed in the same load) to `output_dir/raw_fmri`. `shuffled` is the
     `(ExplainedVarianceData, gaps)` pair from `load_shuffled_internal_data`; when given (or
     missing/empty) the shuffled-embedding internal aggregate is exported (or reported as a gap)
-    in explained-variance mode. `intervals` is the `bootstrap_intervals` result matching the data
-    (explained-variance data for the main figures, raw-fMRI data for `raw_fmri`); it adds the
-    saturation-rank whiskers the notebook always shows. Points are colored by model, as in the
-    notebook.
+    in explained-variance mode. `intervals` is the `bootstrap_intervals` result (its `raw_fmri`
+    entry is used for the `raw_fmri` appendix); it adds the saturation-rank whiskers the notebook
+    always shows. Points are colored by model, as in the
+    notebook. `scope` ("all", "local" or "remote") keeps only the figures of that scope (see
+    `REMOTE_ONLY`); the significance table belongs to the local scope, the gap report is written
+    with every scope.
     """
     import matplotlib.pyplot as plt
     from src.utils.plotting import final_figures as figures
@@ -272,25 +301,31 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
                 loso_quantiles, fractions, mode="loso")),
         ]
     elif saturation_mode == "raw_fmri":
+        # fMRI only: raw r^2 (no noise-ceiling division) from the same loaded results.
         output_dir = output_dir / "raw_fmri"
-        raw = figures.without_models(explained_variance, (RANDOM_MODEL,))
+        raw = figures.without_models(explained_variance.raw_fmri, (RANDOM_MODEL,))
+        raw_intervals = None if intervals is None else intervals["raw_fmri"]
+        _raw_cis = lambda mode: None if raw_intervals is None else raw_intervals[mode]
+        only_fmri = {"datasets": ("fmri",), "fmri_noise_normalized": False}
         jobs = [
             ("rrr_internal_aggregate", lambda: figures.rrr_aggregate(
                 raw.internal, raw.loso, raw.curves, raw.loso_curves, raw.full_rows, example_pair,
                 mode="internal", saturation_mode="explained_variance",
-                intervals=_cis("internal"), fmri_noise_normalized=False)),
+                intervals=_raw_cis("internal"), **only_fmri)),
             ("rrr_loso_aggregate", lambda: figures.rrr_aggregate(
                 raw.internal, raw.loso, raw.curves, raw.loso_curves, raw.full_rows, loso_pair,
                 mode="loso", saturation_mode="explained_variance",
-                intervals=_cis("loso"), fmri_noise_normalized=False)),
+                intervals=_raw_cis("loso"), **only_fmri)),
             ("rrr_cross_dataset_aggregate", lambda: figures.cross_aggregate(
-                raw.cross, "explained_variance", intervals=_cis("auc"))),
-            *_subspace_jobs(raw_fmri_only=True, intervals=intervals),
+                raw.cross, "explained_variance", intervals=_raw_cis("auc"), targets=("fmri",))),
+            *_subspace_jobs(raw_fmri_only=True, intervals=raw_intervals),
         ]
     else:
         raise ValueError(f"unknown saturation mode {saturation_mode!r}")
     if saturation_mode == "explained_variance":
         jobs.extend(_subspace_jobs(intervals=intervals))
+    jobs = select_jobs(jobs, saturation_mode, scope)
+    print(f"Scope {scope}: {len(jobs)} figures for {saturation_mode}.", flush=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for index, (name, build) in enumerate(jobs, start=1):
@@ -306,10 +341,11 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
         finally:
             plt.close(figure)
     if saturation_mode == "explained_variance":
-        table_path = output_dir / "significant_targets.tex"
-        print(f"Saving {table_path}...", flush=True)
-        table_path.write_text(figures.significance_latex(significant, order) + "\n")
-        paths.append(table_path)
+        if scope != "remote":
+            table_path = output_dir / "significant_targets.tex"
+            print(f"Saving {table_path}...", flush=True)
+            table_path.write_text(figures.significance_latex(significant, order) + "\n")
+            paths.append(table_path)
         gaps_path = output_dir / "result_gaps.txt"
         print(f"Saving {gaps_path}...", flush=True)
         gaps_path.write_text("\n".join(gaps) + ("\n" if gaps else ""))
@@ -333,6 +369,12 @@ def main(argv=None):
                         help="Export every notebook figure: the explained-variance figures to "
                              "<output-dir>, the quantile appendix to <output-dir>/quantile and the "
                              "raw-fMRI-r^2 appendix to <output-dir>/raw_fmri. --saturation-mode is ignored.")
+    parser.add_argument("--scope", choices=SCOPES, default="all",
+                        help="all (default): every figure. local: only figures whose results are "
+                             "complete in the local results/ (run here). remote: only figures "
+                             "needing results held on the remote host (LOSO, language decoding, "
+                             "shuffled-embedding control). Combines with --all / --saturation-mode; "
+                             "filenames match, so the two outputs can be merged.")
     parser.add_argument("--example-model", default="gpt2")
     parser.add_argument("--example-layer", type=_layer, default=0,
                         help="Example layer, or 'none' for a layerless model (default: 0)")
@@ -359,6 +401,8 @@ def main(argv=None):
         ("internal", example_pair, curves[0], False),
         ("LOSO", loso_pair, curves[1], True),
     ):
+        if is_loso and args.scope == "local":
+            continue  # no LOSO figure is drawn in the local scope
         pairs = available_pairs(quantiles, loso=is_loso)
         if pair not in pairs:
             available = ", ".join(f"{model}/{'none' if layer is None else layer}"
@@ -368,21 +412,22 @@ def main(argv=None):
                          + (f"\nFirst of {len(data[8])} result gaps:{shown}" if data[8] else ""))
     print(f"Examples: internal={example_pair}, LOSO={loso_pair}", flush=True)
     print(f"Missing or incomplete results: {len(data[8])}; exporting available results.", flush=True)
+    # The shuffled-embedding control only exists on the remote host: never load it for local runs.
+    shuffled_for = lambda: (load_shuffled_internal_data(results_root)
+                            if args.scope != "local" else None)
     if not args.all:
         explained = args.saturation_mode == "explained_variance"
-        shuffled = load_shuffled_internal_data(results_root) if explained else None
+        shuffled = shuffled_for() if explained else None
         print("Loading bootstrap intervals (cached after the first run)...", flush=True)
         intervals = bootstrap_intervals(results_root, data[9]) if explained else None
         return export_figures(data, args.output_dir, args.format, example_pair, loso_pair,
-                              args.saturation_mode, shuffled, intervals)
+                              args.saturation_mode, shuffled, intervals, scope=args.scope)
     print("Loading bootstrap intervals (cached after the first run)...", flush=True)
+    intervals = bootstrap_intervals(results_root, data[9])
     paths = export_figures(data, args.output_dir, args.format, example_pair, loso_pair,
-                           "explained_variance", load_shuffled_internal_data(results_root),
-                           bootstrap_intervals(results_root, data[9]))
-    paths += export_figures(data, args.output_dir, args.format, example_pair, loso_pair, "quantile")
-    print("Loading raw-fMRI-r^2 result summaries...", flush=True)
-    raw_data = load_final_data(results_root, fmri_noise_normalized=False)
-    raw_intervals = bootstrap_intervals(results_root, raw_data[9], fmri_noise_normalized=False)
-    paths += export_figures(raw_data, args.output_dir, args.format, example_pair, loso_pair, "raw_fmri",
-                            intervals=raw_intervals)
+                           "explained_variance", shuffled_for(), intervals, scope=args.scope)
+    paths += export_figures(data, args.output_dir, args.format, example_pair, loso_pair, "quantile",
+                            scope=args.scope)
+    paths += export_figures(data, args.output_dir, args.format, example_pair, loso_pair, "raw_fmri",
+                            intervals=intervals, scope=args.scope)
     return paths

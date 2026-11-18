@@ -5,69 +5,61 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 
-from scripts.run_rrr import _dataset_adapter_name
-from src.core.registry import get_dataset_adapter
 from src.utils.atlas.core import bihemispheric_region_groups
 from src.utils.plotting.final_axes import (
     add_bracket_headroom, finish_axis, normalized_curve_axis, paper_style, with_model_legend,
 )
-from src.utils.plotting.final_data import (
-    DATASETS, LABELS, PAIRS, _ev_scale, _fisher, _lagged, _load_matrix, _rrr,
-)
+from src.utils.plotting.final_data import DATASETS, LABELS, PAIRS, load_pair_products
 from src.utils.plotting.final_figures import (
     _saturation_comparison_axis, _saturation_values,
 )
-from src.utils.rrr.plot_metrics import explained_variance_curve
 
 METHODS = ("rrr", "pca")
 
 
-def load_roi_curves(results_root, data_roots, regions=None, pairs=PAIRS,
-                    fmri_noise_normalized=True):
+def roi_curve_tables(products, regions=None, pairs=PAIRS):
     """Mean-r^2-per-target rank curves for every dataset, ROI, model layer and method.
 
     Same definition as the final-plots explained-variance curves (folds Fisher-averaged,
     negatives clipped, squared, averaged over all targets / electrode-lag pairs; fMRI voxels
-    divided by their squared noise ceiling unless `fmri_noise_normalized=False`), but
-    over the targets inside one bihemispheric ROI. `data_roots` maps each dataset key
-    to its raw data root. Returns `(curves, counts, gaps)`: `curves[(dataset, region,
-    model, layer, method)] = (ranks, curve[:, None])`, `counts[(dataset, region)]` the
-    number of targets (electrodes/voxels) in the ROI, and a list of missing results.
+    divided by their squared noise ceiling), but over the targets inside one bihemispheric ROI.
+    `products` is `final_data.load_pair_products(results_root)` (the curves are derived while
+    the results are read for the main figures). Returns `(curves, raw_fmri_curves, counts, gaps)`:
+    `curves[(dataset, region, model, layer, method)] = (ranks, curve[:, None])`,
+    `raw_fmri_curves` the same for fMRI with raw r^2 (no noise-ceiling division),
+    `counts[(dataset, region)]` the number of targets (electrodes/voxels) in the ROI, and a list
+    of missing results.
     """
-    groups = bihemispheric_region_groups()
-    regions = list(groups) if regions is None else list(regions)
-    curves, counts, gaps = {}, {}, []
+    regions = list(bihemispheric_region_groups()) if regions is None else list(regions)
+    curves, raw_curves, counts, gaps = {}, {}, {}, []
     for dataset in DATASETS:
-        adapter = get_dataset_adapter(_dataset_adapter_name(DATASETS[dataset]))
         for model, layer in pairs:
-            try:
-                artifact = _rrr(results_root, "internal", dataset, model, layer
-                                ).load_artifacts(["target_manifest"])
-            except (FileNotFoundError, ValueError, KeyError, OSError, RuntimeError) as error:
-                gaps.append(f"{(dataset, model, layer)}: {error}")
+            internal = products.get((dataset, model, layer), {}).get("internal")
+            if not internal:
+                gaps.append(f"{(dataset, model, layer)}: no internal results")
                 continue
             for method in METHODS:
-                metric = ("corr_per_target" if dataset == "fmri" else
-                          "nr_orth_corr_per_target" if method == "rrr" else "pca_corr_per_target")
-                matrix = _load_matrix(artifact, method, metric)
-                if matrix is None:
+                entry = internal.get(method)
+                if entry is None:
                     continue
-                targets = matrix.targets.copy()
-                targets[["x", "y", "z"]] = adapter.get_electrode_coordinates(
-                    targets, str(data_roots[dataset]))
-                labels = adapter.get_target_atlas_labels(targets, str(data_roots[dataset]))
-                values = _lagged(matrix)
-                scale = _ev_scale(results_root, dataset, matrix.targets, fmri_noise_normalized)
-                for region in regions:
-                    keep = np.isin(labels, list(groups[region]))
-                    counts[(dataset, region)] = int(keep.sum())
-                    if not keep.any():
-                        continue
-                    curve = explained_variance_curve(
-                        _fisher(values[:, :, keep], axis=1),
-                        scale=None if scale is None else scale[keep][:, None])
-                    curves[(dataset, region, model, layer, method)] = (
-                        np.asarray(matrix.ranks, dtype=float), curve[:, None])
+                ranks = entry["ranks"]
+                for variant, target in (("normalized", curves), ("raw_fmri", raw_curves)):
+                    for region, curve in entry["roi_curves"].get(variant, {}).items():
+                        if region in regions:
+                            target[(dataset, region, model, layer, method)] = (ranks, curve[:, None])
+                counts.update({(dataset, region): count
+                               for region, count in entry["roi_counts"].items()
+                               if region in regions})
+    return curves, raw_curves, counts, gaps
+
+
+def load_roi_curves(results_root, data_roots=None, regions=None, pairs=PAIRS):
+    """`(curves, counts, gaps)` of `roi_curve_tables` for the results under `results_root`.
+
+    `data_roots` is accepted for compatibility and unused: the ROI products are built from the
+    standard `data/` layout next to `results/` (see `final_data.load_pair_products`).
+    """
+    curves, _, counts, gaps = roi_curve_tables(load_pair_products(results_root), regions, pairs)
     return curves, counts, gaps
 
 
@@ -77,20 +69,20 @@ def _panel_title(dataset, count):
     return f"{LABELS[dataset]}, n = {count:,} {unit}"
 
 
-def _grid(regions, title):
-    figure, axes = plt.subplots(len(regions), len(DATASETS),
-                                figsize=(4.6 * len(DATASETS), 3.1 * len(regions)),
+def _grid(regions, title, datasets=tuple(DATASETS)):
+    figure, axes = plt.subplots(len(regions), len(datasets),
+                                figsize=(4.6 * len(datasets), 3.1 * len(regions)),
                                 squeeze=False)
     figure.suptitle(title)
     return figure, axes
 
 
-def roi_normalized_curves(curves, counts, regions):
+def roi_normalized_curves(curves, counts, regions, datasets=tuple(DATASETS)):
     """ROI rows x dataset columns: each model layer's normalized curve plus the mean."""
     with paper_style():
-        figure, axes = _grid(regions, "Normalized mean explained variance by ROI")
+        figure, axes = _grid(regions, "Normalized mean explained variance by ROI", datasets)
         for row, region in enumerate(regions):
-            for column, dataset in enumerate(DATASETS):
+            for column, dataset in enumerate(datasets):
                 ax = axes[row, column]
                 members = {method: [value for key, value in curves.items()
                                     if key[:2] == (dataset, region) and key[-1] == method]
@@ -118,7 +110,7 @@ def roi_normalized_curves(curves, counts, regions):
 
 @with_model_legend
 def roi_saturation_distributions(curves, regions, counts=None, *, fraction=.99,
-                                 separate_model=None, intervals=None):
+                                 separate_model=None, intervals=None, datasets=tuple(DATASETS)):
     """ROI rows x dataset columns: paired RRR vs PCA saturation ranks over model layers.
 
     `counts` (`(dataset, region)` -> number of targets) puts each region's electrode / voxel
@@ -128,9 +120,10 @@ def roi_saturation_distributions(curves, regions, counts=None, *, fraction=.99,
     """
     with paper_style():
         figure, axes = _grid(
-            regions, f"Saturation rank by ROI ({fraction * 100:g}% of maximum explained variance)")
+            regions, f"Saturation rank by ROI ({fraction * 100:g}% of maximum explained variance)",
+            datasets)
         for row, region in enumerate(regions):
-            for column, dataset in enumerate(DATASETS):
+            for column, dataset in enumerate(datasets):
                 ax = axes[row, column]
                 ranks = _saturation_values(
                     {(dataset, *key[2:]): value for key, value in curves.items()
