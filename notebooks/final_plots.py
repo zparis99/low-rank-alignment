@@ -405,6 +405,15 @@ def _(mo, order, significance_grid, significance_latex, significant):
 
 
 @app.cell
+def _(decoding, mo):
+    from src.utils.plotting import final_figures as _final_figures
+
+    mo.vstack([mo.md("## Language decoding: cross-dataset AUC correlations"),
+               _final_figures.decoding_auc_scatters(decoding)])
+    return
+
+
+@app.cell
 def _(mo):
     mo.md("""
     # Appendix: target-quantile saturation
@@ -419,6 +428,7 @@ def _(mo):
 
 @app.cell
 def _(
+    MAIN_EXCLUDED,
     full_rows,
     internal,
     loso,
@@ -429,21 +439,28 @@ def _(
     quantiles,
     rrr_aggregate,
     selected_pair,
+    without_models,
 ):
     model_colors_on  # redraw when the point-color toggle changes
+    # Random GPT-2 is held out of the quantile figures, as in the main figures.
+    _internal = without_models(internal, MAIN_EXCLUDED)
+    _loso = without_models(loso, MAIN_EXCLUDED)
+    _quantiles = without_models(quantiles, MAIN_EXCLUDED)
+    _loso_quantiles = without_models(loso_quantiles, MAIN_EXCLUDED)
+    _full_rows = without_models(full_rows, MAIN_EXCLUDED)
     if selected_pair.value is None:
         _quantile_aggregate = mo.md("No internal RRR quantile curves are available.")
     else:
         _quantile_figures = [
             mo.md("## Internal RRR aggregate (quantile saturation)"),
-            rrr_aggregate(internal, loso, quantiles, loso_quantiles,
-                          full_rows, selected_pair.value, mode="internal"),
+            rrr_aggregate(_internal, _loso, _quantiles, _loso_quantiles,
+                          _full_rows, selected_pair.value, mode="internal"),
         ]
         if loso_pair.value is not None:
             _quantile_figures.extend([
                 mo.md("## Leave-one-subject-out RRR aggregate (quantile saturation)"),
-                rrr_aggregate(internal, loso, quantiles, loso_quantiles,
-                              full_rows, loso_pair.value, mode="loso"),
+                rrr_aggregate(_internal, _loso, _quantiles, _loso_quantiles,
+                              _full_rows, loso_pair.value, mode="loso"),
             ])
         _quantile_aggregate = mo.vstack(_quantile_figures)
     _quantile_aggregate
@@ -451,75 +468,106 @@ def _(
 
 
 @app.cell
-def _(cross, cross_aggregate, cross_gap_scatter, mo, model_colors_on):
+def _(
+    MAIN_EXCLUDED,
+    cross,
+    cross_aggregate,
+    cross_gap_scatter,
+    mo,
+    model_colors_on,
+    without_models,
+):
     model_colors_on  # redraw when the point-color toggle changes
+    _cross = without_models(cross, MAIN_EXCLUDED)
     mo.vstack([
         mo.md("## Directed cross-dataset RRR aggregate (correlation curves)"),
-        cross_aggregate(cross),
+        cross_aggregate(_cross),
         mo.md("## Internal minus transfer AUC gap correlation (correlation curves)"),
-        cross_gap_scatter(cross),
+        cross_gap_scatter(_cross),
     ])
     return
 
 
 @app.cell
-def _(mo, quantile_grid, quantiles, selected_pair):
+def _(
+    MAIN_EXCLUDED,
+    mo,
+    quantile_grid,
+    quantiles,
+    selected_pair,
+    without_models,
+):
     if selected_pair.value is None:
         quantile_output = mo.md("No selected model layer.")
     else:
         quantile_output = mo.vstack([
             mo.md("## RRR and PCA target quantiles by rank"),
-            quantile_grid(quantiles, selected_pair.value),
+            quantile_grid(without_models(quantiles, MAIN_EXCLUDED), selected_pair.value),
         ])
     quantile_output
     return
 
 
 @app.cell
-def _(average_quantile_grid, quantiles):
-    average_quantile_grid(quantiles).savefig("average-quantiles.png")
+def _(MAIN_EXCLUDED, average_quantile_grid, quantiles, without_models):
+    average_quantile_grid(without_models(quantiles, MAIN_EXCLUDED)).savefig("average-quantiles.png")
     return
 
 
 @app.cell
-def _(average_quantile_grid, mo, quantiles):
+def _(MAIN_EXCLUDED, average_quantile_grid, mo, quantiles, without_models):
     mo.vstack([
         mo.md("## Mean normalized quantile curves across model layers"),
-        average_quantile_grid(quantiles),
+        average_quantile_grid(without_models(quantiles, MAIN_EXCLUDED)),
     ])
     return
 
 
 @app.cell
-def _(quantiles, sensitivity_grid):
-    sensitivity_grid(quantiles, (0, .005, .01), variable="floor").savefig("floor-sensitivity.png")
+def _(MAIN_EXCLUDED, quantiles, sensitivity_grid, without_models):
+    sensitivity_grid(without_models(quantiles, MAIN_EXCLUDED), (0, .005, .01), variable="floor").savefig("floor-sensitivity.png")
     return
 
 
 @app.cell
-def _(mo, model_colors_on, quantiles, sensitivity_grid):
+def _(
+    MAIN_EXCLUDED,
+    mo,
+    model_colors_on,
+    quantiles,
+    sensitivity_grid,
+    without_models,
+):
     model_colors_on  # redraw when the point-color toggle changes
+    _quantiles = without_models(quantiles, MAIN_EXCLUDED)
     mo.vstack([
         mo.md("## Saturation sensitivity to minimum quantile correlation"),
-        sensitivity_grid(quantiles, (0, .005, .01), variable="floor"),
+        sensitivity_grid(_quantiles, (0, .005, .01), variable="floor"),
         mo.md("## Saturation sensitivity to required peak performance"),
-        sensitivity_grid(quantiles, (.5, .75, .9, .95, .975, .99, 1.0)),
+        sensitivity_grid(_quantiles, (.5, .75, .9, .95, .975, .99, 1.0)),
     ])
     return
 
 
 @app.cell
-def _(quantiles, sensitivity_grid):
-    sensitivity_grid(quantiles, (.5, .75, .9, .95, .975, .99, 1.0)).savefig("perf-sensitivity.png")
+def _(MAIN_EXCLUDED, quantiles, sensitivity_grid, without_models):
+    sensitivity_grid(without_models(quantiles, MAIN_EXCLUDED), (.5, .75, .9, .95, .975, .99, 1.0)).savefig("perf-sensitivity.png")
     return
 
 
 @app.cell(hide_code=True)
-def _(loso_quantiles, mo, model_colors_on, sensitivity_grid):
+def _(
+    MAIN_EXCLUDED,
+    loso_quantiles,
+    mo,
+    model_colors_on,
+    sensitivity_grid,
+    without_models,
+):
     model_colors_on  # redraw when the point-color toggle changes
     mo.vstack([
         mo.md("## LOSO saturation sensitivity to required peak performance"),
-        sensitivity_grid(loso_quantiles, (.5, .75, .9, .95, .975, .99, 1.0), mode="loso"),
+        sensitivity_grid(without_models(loso_quantiles, MAIN_EXCLUDED), (.5, .75, .9, .95, .975, .99, 1.0), mode="loso"),
     ])
     return
 

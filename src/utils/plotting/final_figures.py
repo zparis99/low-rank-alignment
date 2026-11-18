@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from src.utils.plotting.final_axes import (
-    COLORS, add_decoding_gradient, correlation_scatter_axis, decoding_relative_axis,
+    COLORS, MODEL_COLORS, MODEL_NAMES, add_decoding_gradient, correlation_scatter_axis, decoding_relative_axis,
     distribution_axis, finish_axis,
     format_p_value,
     normalized_curve_axis, pairwise_test_brackets, paper_style, quantile_axis, rank_curve_axis,
@@ -246,8 +246,8 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
         else:
             figure = plt.figure(figsize=(19, 7.4 if count == len(DATASETS) else 4.6))
             grid = figure.add_gridspec(
-                count, 3, width_ratios=[1.25, 1.25, 3],
-                hspace=.52, wspace=.35,
+                count, 3, width_ratios=[1.4, 1.4, 3] if mode == "internal" else [1.0, 1.0, 4],
+                hspace=.55, wspace=.38,
             )
             saturation_grid = grid[:, 2].subgridspec(1, count, wspace=.10)
         source = internal if mode == "internal" else loso
@@ -284,12 +284,9 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                 rank_curve_axis(sample_ax, sample_curves, saturation=markers,
                                 baseline=baseline_map.get((dataset, *selected_pair)),
                                 ylabel=settings["ylabel"])
-                sample_ax.set_title(LABELS[dataset] + (
-                    "\n(fraction of explainable variance)" if fmri_noise_normalized
-                    and dataset == "fmri" and saturation_mode == "explained_variance" else ""),
-                    fontsize=14)
+                sample_ax.set_title(LABELS[dataset], fontsize=15)
                 if row == 0:
-                    sample_ax.legend(frameon=False, ncol=2, fontsize=9,
+                    sample_ax.legend(frameon=False, ncol=2, fontsize=11,
                                      handlelength=1.2, columnspacing=.7)
                 if row != count - 1:
                     sample_ax.set_xlabel("")
@@ -299,7 +296,7 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                 normalized_curve_axis(mean_ax, _members(frame, saturation_mode))
                 mean_ax.set_title(LABELS[dataset])
                 if row == 0:
-                    mean_ax.legend(frameon=False, ncol=2, fontsize=9,
+                    mean_ax.legend(frameon=False, ncol=2, fontsize=11,
                                    handlelength=1.2, columnspacing=.7)
                 mean_ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])
                 if row != count - 1:
@@ -331,7 +328,7 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                                         separate_model=separate_model,
                                         tick_labels=tick_labels, intervals=panel_intervals)
             if mode == "loso":
-                distribution_ax.tick_params(axis="x", labelsize=10)
+                distribution_ax.tick_params(axis="x", labelsize=14)
             if row != 0:
                 distribution_ax.set_ylabel("")
                 distribution_ax.tick_params(axis="y", labelleft=False)
@@ -342,7 +339,7 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
                      else "Maximum Explained Variance")
         title = f"Saturation Distributions ({fraction * 100:g}% {peak_text})"
         if distributions_only:
-            figure.suptitle(title, fontsize=17)
+            figure.suptitle(title, fontsize=18)
             figure.tight_layout(rect=(0, 0, 1, .94))
             return figure
         # The explained-variance y label is two lines and needs a wider left margin.
@@ -354,13 +351,13 @@ def rrr_aggregate(internal, loso, quantiles, loso_quantiles, full_rows,
         saturation_end = distribution_ax.get_position()
         figure.text((sample_box.x0 + sample_box.x1) / 2, .965,
                     "A. Sample Rank Curves", ha="center",
-                    va="bottom", fontsize=15, weight="bold")
+                    va="bottom", fontsize=16, weight="bold")
         figure.text((mean_box.x0 + mean_box.x1) / 2, .965,
                     "B. Mean Convergence", ha="center",
-                    va="bottom", fontsize=15, weight="bold")
+                    va="bottom", fontsize=16, weight="bold")
         figure.text((saturation_start.x0 + saturation_end.x1) / 2, .965,
                     f"C. {title}",
-                    ha="center", va="bottom", fontsize=15, weight="bold")
+                    ha="center", va="bottom", fontsize=16, weight="bold")
         return figure
 
 
@@ -397,7 +394,7 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
             figure = plt.figure(figsize=(12 if len(directed) > 2 else 7, 12))
             right = figure.add_gridspec(3, 1, hspace=.30)
         else:
-            figure = plt.figure(figsize=(21, 10.5))
+            figure = plt.figure(figsize=(21, 9))
             grid = figure.add_gridspec(3, 6)
             left = grid[:, :3].subgridspec(2, -(-len(directed) // 2), hspace=.28, wspace=.10)
             right = grid[:, 3:].subgridspec(3, 1, hspace=.30)
@@ -422,7 +419,7 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
                 if first_directed_ax is None:
                     first_directed_ax = ax
                 normalized_curve_axis(ax, _members(panel, saturation_mode))
-                ax.set_title(f"{LABELS[source]} → {LABELS[target]}", fontsize=13)
+                ax.set_title(f"{LABELS[source]} →\n{LABELS[target]}", fontsize=14)
                 ax.set_xlabel("")
                 if index // 2 != 0:
                     ax.set_ylabel("")
@@ -430,12 +427,12 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
                 ax.set_xticks([0, .01, .1, 1], ["0", "1%", "10%", "100%"])
                 if index % 2 == 1 and index // 2 > 0:
                     ax.set_xticks([0, .01, .1, 1], ["", "1%", "10%", "100%"])
-                ax.tick_params(axis="both", labelsize=10)
+                ax.tick_params(axis="both", labelsize=14)
                 ax.tick_params(axis="x", labelbottom=index % 2 == 1)
                 if index == 0:
-                    ax.legend(frameon=False, fontsize=8, ncol=2,
+                    ax.legend(frameon=False, fontsize=10, ncol=2,
                               handlelength=1.2, columnspacing=.7)
-            label = f"{LABELS[source]} → {LABELS[target]}"
+            label = f"{LABELS[source].split(' (')[0]} → {LABELS[target].split(' (')[0]}"
             directions[label] = (target, source)
             for (model, _), values in _cross_auc(panel, saturation_mode).items():
                 is_separate = model == separate_model
@@ -463,9 +460,9 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
             distribution_axis(ax, output, show_points=True, point_models=point_models,
                               label_colors=colors, model_intervals=model_intervals)
             ax.axhline(0, color="#111827", linestyle="--", linewidth=1)
-            ax.set_title(title, fontsize=14)
+            ax.set_title(title, fontsize=15)
             ax.set_ylabel("Normalized AUC difference" if row == 1 else "")
-            ax.tick_params(axis="x", labelbottom=row == 2, labelsize=10)
+            ax.tick_params(axis="x", labelbottom=row == 2, labelsize=14)
             if separate_groups[row]:
                 n_main = len(groups[row]) - len(separate_groups[row])
                 separate_group_captions(ax, n_main, len(groups[row]), offset=95,
@@ -474,8 +471,8 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
                 if separate_groups[row]:
                     ax.set_xticklabels([text.get_text().removesuffix(separate_label(""))
                                         for text in ax.get_xticklabels()])
-                plt.setp(ax.get_xticklabels(), rotation=28, ha="right", fontsize=10)
-                ax.set_xlabel("Directed source → target comparison", fontsize=13)
+                plt.setp(ax.get_xticklabels(), rotation=28, ha="right", fontsize=14)
+                ax.set_xlabel("Directed source → target comparison", fontsize=14)
             for position, (group, values) in enumerate(output.items(), start=1):
                 if values:
                     p = model_sign_flip(values, np.zeros(len(values)), point_models[group],
@@ -485,26 +482,26 @@ def cross_aggregate(cross, saturation_mode="quantile", separate_model=None,
                     ax.text(position, .98,
                             "no test (1 model)" if np.isnan(p) else f"{mark} {format_p_value(p)}",
                             transform=ax.get_xaxis_transform(), ha="center", va="top",
-                            fontsize=9 if separate_groups[row] else 10,
+                            fontsize=11 if separate_groups[row] else 12,
                             rotation=90 if separate_groups[row] else 0)
             if separate_groups[row]:
                 add_bracket_headroom(ax, 1, extra=.18)
         if distributions_only:
-            figure.suptitle("Normalized AUC Differences", fontsize=17)
+            figure.suptitle("Normalized AUC Differences", fontsize=18)
             figure.tight_layout(rect=(0, 0, 1, .96))
             return figure
-        figure.subplots_adjust(left=.045, right=.99, top=.88, bottom=.15,
-                               hspace=.48, wspace=.42)
+        figure.subplots_adjust(left=.05, right=.995, top=.875, bottom=.17,
+                               hspace=.45, wspace=.42)
         left_start, left_end = (grid[0, column].get_position(figure) for column in (0, 2))
         right_start, right_end = (grid[0, column].get_position(figure) for column in (3, 5))
-        figure.text((left_start.x0 + left_end.x1) / 2, .965,
-                    "A. Directed Transfer Curves", ha="center", va="bottom",
-                    fontsize=15, weight="bold")
-        figure.text((right_start.x0 + right_end.x1) / 2, .965,
-                    "B. Normalized AUC Differences", ha="center", va="bottom",
-                    fontsize=15, weight="bold")
-        figure.text((left_start.x0 + left_end.x1) / 2, .075,
-                    "Relative rank", ha="center", fontsize=13)
+        figure.text((left_start.x0 + left_end.x1) / 2, .985,
+                    "A. Directed Transfer Curves", ha="center", va="top",
+                    fontsize=16, weight="bold")
+        figure.text((right_start.x0 + right_end.x1) / 2, .985,
+                    "B. Normalized AUC Differences", ha="center", va="top",
+                    fontsize=16, weight="bold")
+        figure.text((left_start.x0 + left_end.x1) / 2, .085,
+                    "Relative rank", ha="center", fontsize=14)
         return figure
 
 
@@ -562,7 +559,8 @@ def cross_gap_scatter(cross, saturation_mode="quantile"):
 
 def _model_layout(items, order):
     positions, labels, colors, centers = [], [], [], {}
-    color_map = {model: plt.get_cmap("tab20")(i / max(len(order) - 1, 1))
+    # Same model colors as every distribution plot; unknown models fall back to a tab20 shade.
+    color_map = {model: MODEL_COLORS.get(model, plt.get_cmap("tab20")(i / max(len(order) - 1, 1)))
                  for i, model in enumerate(order)}
     x = 0.0
     for model in order:
@@ -593,8 +591,8 @@ def model_order(full_rows):
 def _model_grid_style(ax, positions, labels, centers):
     ax.set_xticks(positions, labels, rotation=45, ha="right")
     for model, center in centers.items():
-        ax.text(center, -.23, model, transform=ax.get_xaxis_transform(),
-                ha="center", va="top", fontsize=12)
+        ax.text(center, -.23, MODEL_NAMES.get(model, model), transform=ax.get_xaxis_transform(),
+                ha="center", va="top", fontsize=14)
     finish_axis(ax)
 
 
@@ -673,7 +671,7 @@ def significance_latex(significant, order):
 
 def quantile_grid(quantiles, selected_pair, *, fraction=.99):
     with paper_style():
-        figure, axes = plt.subplots(3, 2, figsize=(13, 12))
+        figure, axes = plt.subplots(3, 2, figsize=(13, 10.5))
         for row, dataset in enumerate(DATASETS):
             for col, method in enumerate(("rrr", "pca")):
                 ax = axes[row, col]
@@ -695,7 +693,7 @@ def quantile_grid(quantiles, selected_pair, *, fraction=.99):
 
 def average_quantile_grid(quantiles):
     with paper_style():
-        figure, axes = plt.subplots(3, 2, figsize=(13, 12))
+        figure, axes = plt.subplots(3, 2, figsize=(13, 10.5))
         palette = plt.get_cmap("viridis")(np.linspace(.08, .92, len(QUANTILES)))
         for row, dataset in enumerate(DATASETS):
             for col, method in enumerate(("rrr", "pca")):
@@ -749,7 +747,7 @@ def quantile_saturation_robustness(quantiles, *, fraction=.99):
         axes[0].set_ylabel("Saturation rank $k$")
         figure.suptitle(f"Internal saturation robustness · all eligible quantiles at {fraction * 100:g}%")
         figure.text(.5, .02, "25th, 50th, and 75th percentiles · positive peaks · monotonic curves",
-                    ha="center", fontsize=11)
+                    ha="center", fontsize=13)
         figure.tight_layout(rect=(0, .05, 1, .91))
         return figure
 
@@ -820,7 +818,7 @@ def sensitivity_grid(results, values, *, mode="internal", variable="fraction",
         basis = "quantile" if saturation_mode == "quantile" else "explained-variance"
         figure.suptitle(f"{title} RRR {basis} saturation sensitivity: {setting}")
         figure.text(.015, .5, "Saturation rank $k$", rotation=90,
-                    va="center", ha="center", fontsize=14)
+                    va="center", ha="center", fontsize=15)
         figure.subplots_adjust(left=.18 if variable == "floor" else .13,
                                right=.99, top=.89, bottom=.06,
                                hspace=.54, wspace=.10)
@@ -829,7 +827,7 @@ def sensitivity_grid(results, values, *, mode="internal", variable="fraction",
                 position = axes[row, 0].get_position()
                 figure.text(.125, (position.y0 + position.y1) / 2,
                             f"Minimum peak\n{value:g}", ha="right", va="center",
-                            fontsize=10)
+                            fontsize=12)
         return figure
 
 
@@ -856,45 +854,45 @@ def _decoding_relative(decoding):
     return wide
 
 
+_DECODING_FEATURES = [("concreteness", "Concreteness"),
+                      ("sentence_position", "Sentence position"),
+                      ("standardized_entropy", "Entropy"),
+                      ("volume", "Volume")]
+
+
+def _decoding_consensus(frame):
+    """Per (model, layer, task) relative decoding AUC of every dataset (rows with all datasets)."""
+    auc_rows = []
+    if not frame.empty:
+        for (dataset, model, layer, task), group in frame.groupby(
+            ["dataset", "model", "layer", "task"], dropna=False
+        ):
+            mean = group.groupby("k")["relative"].mean().sort_index()
+            ranks = mean.index.to_numpy(dtype=float)
+            if len(ranks) < 2:
+                continue
+            x = np.log(ranks)
+            span = x[-1] - x[0]
+            if span > 0:
+                auc_rows.append((dataset, model, layer, task,
+                                 float(np.trapezoid(mean, x=(x - x[0]) / span))))
+    auc = pd.DataFrame(auc_rows, columns=["dataset", "model", "layer", "task", "auc"])
+    consensus = (auc.pivot_table(
+        index=["model", "layer", "task"], columns="dataset", values="auc"
+    ).dropna(subset=list(DATASETS)).reset_index()
+                 if not auc.empty else pd.DataFrame())
+    return consensus
+
+
 def decoding_aggregate(decoding):
-    """Four example decoding curves above three paired dataset AUC scatters."""
+    """Relative decoding curves (RRR vs PCA) for four example features, one panel each."""
     with paper_style():
-        figure = plt.figure(figsize=(20, 10.5))
-        grid = figure.add_gridspec(2, 12, height_ratios=[1, 1.6],
-                                  hspace=.67, wspace=.46)
+        figure = plt.figure(figsize=(20, 4.8))
+        grid = figure.add_gridspec(1, 4, wspace=.08)
         frame = _decoding_relative(decoding)
-        features = [("concreteness", "Concreteness"),
-                    ("sentence_position", "Sentence position"),
-                    ("standardized_entropy", "Entropy"),
-                    ("volume", "Volume")]
-        pairs = [("cars-2", "podcast"), ("podcast", "fmri"),
-                 ("cars-2", "fmri")]
-        auc_rows = []
-        if not frame.empty:
-            for (dataset, model, layer, task), group in frame.groupby(
-                ["dataset", "model", "layer", "task"], dropna=False
-            ):
-                mean = group.groupby("k")["relative"].mean().sort_index()
-                ranks = mean.index.to_numpy(dtype=float)
-                if len(ranks) < 2:
-                    continue
-                x = np.log(ranks)
-                span = x[-1] - x[0]
-                if span > 0:
-                    auc_rows.append((dataset, model, layer, task,
-                                     float(np.trapezoid(mean, x=(x - x[0]) / span))))
-        auc = pd.DataFrame(auc_rows, columns=["dataset", "model", "layer", "task", "auc"])
-        consensus = (auc.pivot_table(
-            index=["model", "layer", "task"], columns="dataset", values="auc"
-        ).dropna(subset=list(DATASETS)).reset_index()
-                     if not auc.empty else pd.DataFrame())
-        bound = (max(float(np.nanmax(np.abs(consensus[list(DATASETS)].to_numpy()))), .05)
-                 if not consensus.empty else .05) * 1.05
-        ticks = MaxNLocator(nbins=5, symmetric=True).tick_values(-bound, bound)
-        limits = (float(ticks[0]), float(ticks[-1]))
         curve_axes = []
-        for col, (task, title) in enumerate(features):
-            ax = figure.add_subplot(grid[0, 3 * col:3 * (col + 1)],
+        for col, (task, title) in enumerate(_DECODING_FEATURES):
+            ax = figure.add_subplot(grid[0, col],
                                     sharey=curve_axes[0] if curve_axes else None)
             curve_axes.append(ax)
             for dataset, linestyle in zip(DATASETS, ("-", "--", ":")):
@@ -928,15 +926,29 @@ def decoding_aggregate(decoding):
                 ax.text(
                     1.07, zero + direction * .24 * arrow_scale, label,
                     transform=ax.transAxes, ha="center", va="center", rotation=90,
-                    color=color, fontsize=9, clip_on=False,
+                    color=color, fontsize=11, clip_on=False,
                 )
         handles, labels = curve_axes[0].get_legend_handles_labels()
         figure.legend(handles, labels, frameon=False, ncol=3,
-                      loc="upper center", bbox_to_anchor=(.5, .948))
-        scatter_axes = []
+                      loc="upper center", bbox_to_anchor=(.5, 1.0))
+        figure.subplots_adjust(left=.05, right=.975, top=.80, bottom=.15)
+        return figure
+
+
+def decoding_auc_scatters(decoding):
+    """Cross-dataset correlations of the relative decoding AUCs (one scatter per dataset pair)."""
+    with paper_style():
+        figure = plt.figure(figsize=(18, 6))
+        grid = figure.add_gridspec(1, 3, wspace=.28)
+        frame = _decoding_relative(decoding)
+        pairs = [("cars-2", "podcast"), ("podcast", "fmri"), ("cars-2", "fmri")]
+        consensus = _decoding_consensus(frame)
+        bound = (max(float(np.nanmax(np.abs(consensus[list(DATASETS)].to_numpy()))), .05)
+                 if not consensus.empty else .05) * 1.05
+        ticks = MaxNLocator(nbins=5, symmetric=True).tick_values(-bound, bound)
+        limits = (float(ticks[0]), float(ticks[-1]))
         for col, (first, second) in enumerate(pairs):
-            scatter = figure.add_subplot(grid[1, 4 * col:4 * (col + 1)])
-            scatter_axes.append(scatter)
+            scatter = figure.add_subplot(grid[0, col])
             matched = (consensus[[first, second]].dropna() if not consensus.empty
                        else pd.DataFrame(columns=[first, second]))
             correlation_scatter_axis(scatter, matched[first], matched[second], limits, ticks)
@@ -953,24 +965,13 @@ def decoding_aggregate(decoding):
                     f"{LABELS[first]} vs {LABELS[second]}\n"
                     f"Pearson r = {r:.2f}, {format_p_value(p_value)}\n"
                     f"n = {len(matched)}",
-                    fontsize=13,
+                    fontsize=14,
                 )
             if col == 0:
-                scatter.legend(frameon=False, fontsize=10, loc="upper left")
+                scatter.legend(frameon=False, fontsize=12, loc="upper left")
             scatter.set_xlabel(f"{LABELS[first]} relative AUC")
             scatter.set_ylabel(f"{LABELS[second]} relative AUC")
-        figure.subplots_adjust(left=.065, right=.985, top=.84, bottom=.10)
-        curve_left = curve_axes[0].get_position()
-        curve_right = curve_axes[-1].get_position()
-        scatter_left = scatter_axes[0].get_position()
-        scatter_right = scatter_axes[-1].get_position()
-        figure.text((curve_left.x0 + curve_right.x1) / 2, .975,
-                    "A. Relative Decoding Curves", ha="center", va="bottom",
-                    fontsize=15, weight="bold")
-        figure.text((scatter_left.x0 + scatter_right.x1) / 2,
-                    scatter_left.y1 + .085,
-                    "B. Cross-Dataset AUC Correlations", ha="center", va="bottom",
-                    fontsize=15, weight="bold")
+        figure.subplots_adjust(left=.06, right=.99, top=.76, bottom=.14)
         return figure
 
 
@@ -1015,7 +1016,7 @@ def roi_curves_figure(curves, region_sets, dataset, pair, *, fraction=.99, colum
                                linewidth=1.4)
             n_electrodes = inside[["subject", "electrode"]].drop_duplicates().shape[0]
             ax.text(.97, .05, f"n={n_electrodes}", ha="right", va="bottom",
-                    transform=ax.transAxes, fontsize=11, color="#64748b")
+                    transform=ax.transAxes, fontsize=13, color="#64748b")
             ax.set_xscale("log", base=2)
             ax.set(xlabel="Rank $k$", ylabel="r")
             finish_axis(ax)

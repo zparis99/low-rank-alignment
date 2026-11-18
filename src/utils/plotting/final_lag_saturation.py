@@ -227,6 +227,6 @@ def lag_saturation_figure(data, intervals=None, significance=None, *, ranks_labe
         handles, labels = axes[0].get_legend_handles_labels()
         figure.tight_layout()
         figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(.5, 0.0),
-                      ncol=3, frameon=False, fontsize=12)
+                      ncol=3, frameon=False, fontsize=14)
     plt.close(figure)
     return figure

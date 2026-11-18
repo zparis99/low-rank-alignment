@@ -15,11 +15,11 @@ def _intervals(monkeypatch):
 def _data():
     quantiles = {(dataset, model, layer, method): None
                  for dataset in final_data.DATASETS
-                 for model, layer in (("gpt2", 0), ("glove", None))
+                 for model, layer in (("gpt-j-6b", 21), ("glove", None))
                  for method in ("rrr", "pca")}
     loso_quantiles = {(dataset, model, layer, subject, method): None
                       for dataset in final_data.DATASETS
-                      for model, layer in (("gpt2", 0), ("glove", None))
+                      for model, layer in (("gpt-j-6b", 21), ("glove", None))
                       for subject in (1, 2)
                       for method in ("RRR baseline", "RRR transfer", "PCA baseline")}
     explained_variance = final_data.ExplainedVarianceData(
@@ -28,11 +28,11 @@ def _data():
 
 
 @pytest.mark.parametrize("arguments,internal,loso", [
-    ([], ("gpt2", 0), ("gpt2", 0)),
+    ([], ("gpt-j-6b", 21), ("gpt-j-6b", 21)),
     (["--example-model", "glove", "--example-layer", "none"],
      ("glove", None), ("glove", None)),
     (["--loso-example-model", "glove", "--loso-example-layer", "none"],
-     ("gpt2", 0), ("glove", None)),
+     ("gpt-j-6b", 21), ("glove", None)),
 ])
 def test_example_selection(monkeypatch, tmp_path, arguments, internal, loso):
     data = _data()
@@ -76,8 +76,8 @@ def test_all_exports_every_appendix(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("saturation_mode", ["explained_variance", "quantile"])
 @pytest.mark.parametrize("index,key", [
-    (3, ("fmri", "gpt2", 0, "pca")),
-    (4, ("fmri", "gpt2", 0, 1, "RRR transfer")),
+    (3, ("fmri", "gpt-j-6b", 21, "pca")),
+    (4, ("fmri", "gpt-j-6b", 21, 1, "RRR transfer")),
 ])
 def test_incomplete_example_rejected_before_export(monkeypatch, tmp_path, capsys, index,
                                                    key, saturation_mode):
@@ -88,7 +88,7 @@ def test_incomplete_example_rejected_before_export(monkeypatch, tmp_path, capsys
     del tables[key]
     if index == 4:
         # LOSO eligibility requires at least one subject for each method.
-        del tables[("fmri", "gpt2", 0, 2, "RRR transfer")]
+        del tables[("fmri", "gpt-j-6b", 21, 2, "RRR transfer")]
     monkeypatch.setattr(final_data, "load_final_data", lambda root, **kwargs: data)
     output = tmp_path / "figures"
     with pytest.raises(SystemExit) as error:
@@ -124,8 +124,8 @@ def test_every_loso_figure_is_remote():
 def test_local_scope_skips_remote_only_loads(monkeypatch, tmp_path):
     data = _data()
     # No LOSO example is needed locally, even when the local results lack it.
-    del data[9].loso_curves[("fmri", "gpt2", 0, 1, "RRR transfer")]
-    del data[9].loso_curves[("fmri", "gpt2", 0, 2, "RRR transfer")]
+    del data[9].loso_curves[("fmri", "gpt-j-6b", 21, 1, "RRR transfer")]
+    del data[9].loso_curves[("fmri", "gpt-j-6b", 21, 2, "RRR transfer")]
     monkeypatch.setattr(final_data, "load_final_data", lambda root, **kwargs: data)
     monkeypatch.setattr(final_data, "load_shuffled_internal_data",
                         lambda root: pytest.fail("shuffled control is remote-only"))

@@ -52,9 +52,18 @@ def with_model_legend(build):
             handles = [plt.Line2D([], [], marker="o", linestyle="", markersize=9,
                                   markerfacecolor=MODEL_COLORS[m], markeredgecolor="white",
                                   label=MODEL_NAMES[m]) for m in order]
-            figure.legend(handles=handles, loc="upper center", bbox_to_anchor=(.5, 0.0),
-                          ncol=len(handles), frameon=False, fontsize=12,
-                          title="Point color: model")
+            # Centre the legend under the distribution plots (not the whole figure), wrapping
+            # to extra rows when those plots are narrower than one row of entries.
+            boxes = [ax.get_position() for ax in figure.axes if getattr(ax, "_has_model_points", False)]
+            left, right = min(box.x0 for box in boxes), max(box.x1 for box in boxes)
+            width_in = (right - left) * figure.get_figwidth()
+            entry_in = .75 + .105 * max(len(MODEL_NAMES[m]) for m in order)
+            ncol = max(1, min(len(handles), int(width_in // entry_in)))
+            figure.legend(handles=handles, loc="upper center",
+                          bbox_to_anchor=((left + right) / 2, 0.0), ncol=ncol, frameon=False,
+                          fontsize=14, title="Point color: model", title_fontsize=14,
+                          columnspacing=.9, handletextpad=.1, labelspacing=.25,
+                          borderpad=.1, borderaxespad=0)
         return figure
     return wrapper
 
@@ -89,7 +98,7 @@ def separate_group_captions(ax, n_main, n_total, *, offset, names=("Other models
             break
         ax.annotate(name, ((first + last) / 2, 0), xycoords=ax.get_xaxis_transform(),
                     xytext=(0, -offset), textcoords="offset points", ha="center",
-                    va="top", fontsize=12, color="#374151", fontweight="bold",
+                    va="top", fontsize=14, color="#374151", fontweight="bold",
                     annotation_clip=False)
 
 
@@ -116,9 +125,9 @@ def _method_style(method):
 def paper_style():
     """Use type sizes that remain readable when figures are placed in a paper."""
     return plt.rc_context({
-        "font.size": 14, "axes.titlesize": 17, "axes.labelsize": 15,
-        "xtick.labelsize": 12, "ytick.labelsize": 12,
-        "legend.fontsize": 12, "figure.titlesize": 19,
+        "font.size": 16, "axes.titlesize": 18, "axes.labelsize": 17,
+        "xtick.labelsize": 16, "ytick.labelsize": 16,
+        "legend.fontsize": 14, "figure.titlesize": 21,
         "savefig.dpi": 300,
     })
 
@@ -252,6 +261,7 @@ def distribution_axis(ax, groups, *, log2_rank=False, show_points=True, paired=N
             xs = np.array([position + offset[str(m)] for m in label_models])
             if _COLOR_POINTS_BY_MODEL:
                 ax.figure.__dict__.setdefault("_point_models", set()).update(label_models)
+                ax._has_model_points = True
             model_color = (lambda m: MODEL_COLORS.get(m, "#64748b") if _COLOR_POINTS_BY_MODEL
                            else color)
             if show_points:
@@ -279,7 +289,7 @@ def distribution_axis(ax, groups, *, log2_rank=False, show_points=True, paired=N
         if show_mean_value:
             ax.annotate(f"$\\mu$ = {mean:.1f}", (position, mean_height),
                         xytext=(0, 8), textcoords="offset points",
-                        ha="center", va="bottom", fontsize=10, zorder=5,
+                        ha="center", va="bottom", fontsize=12, zorder=5,
                         bbox={"facecolor": "white", "edgecolor": "none",
                               "alpha": .75, "pad": 1})
     ax.set_xticks(positions, labels)
@@ -305,7 +315,7 @@ def pairwise_test_brackets(ax, labels, comparisons):
         mark = "*" if p_value < .05 else "n.s."
         p_text = format_p_value(p_value)
         ax.text((left + right) / 2, y + tick, f"{mark} {p_text}",
-                transform=transform, ha="center", va="bottom", fontsize=10,
+                transform=transform, ha="center", va="bottom", fontsize=12,
                 color="#374151", clip_on=False, zorder=7)
 
 
@@ -400,7 +410,7 @@ def correlation_scatter_axis(ax, x_values, y_values, limits, ticks):
     ax.set_xticks(ticks)
     ax.set_yticks(ticks)
     ax.set_aspect("equal", adjustable="box")
-    ax.tick_params(axis="both", labelsize=11)
+    ax.tick_params(axis="both", labelsize=15)
     finish_axis(ax)
 
 

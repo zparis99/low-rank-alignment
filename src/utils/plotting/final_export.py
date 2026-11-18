@@ -26,12 +26,15 @@ RANDOM_MODEL = "random-gpt2"
 
 SCOPES = ("all", "local", "remote")
 # Figures that need results which are only on the remote host, per saturation mode: leave-one-
-# subject-out runs (all models, fMRI scalers), the language-decoding runs and the shuffled-embedding
-# control. Every other figure is `local`.
+# subject-out runs (all models, fMRI scalers), the language-decoding runs, the shuffled-embedding
+# control and the word-embedding PCA (the random GPT-2 embeddings are saved there). Every other
+# figure is `local`.
 REMOTE_ONLY = {
     "explained_variance": frozenset({
         "rrr_loso_aggregate", "rrr_loso_aggregate_random_gpt2",
         "loso_saturation_sensitivity_fraction", "language_decoding_aggregate",
+        "language_decoding_auc_scatters",
+        "embedding_pca_podcast", "embedding_pca_cars-2", "embedding_pca_fmri",
         "rrr_internal_aggregate_shuffled", "subspace_consistency", "loso_principal_angles",
         "loso_aligned_delta", "loso_saturation_split", "loso_saturation_split_random_gpt2",
     }),
@@ -265,6 +268,7 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
             ("loso_saturation_sensitivity_fraction", lambda: figures.sensitivity_grid(
                 ev.loso_curves, fractions, mode="loso", saturation_mode=saturation_mode)),
             ("language_decoding_aggregate", lambda: figures.decoding_aggregate(decoding)),
+            ("language_decoding_auc_scatters", lambda: figures.decoding_auc_scatters(decoding)),
             ("encoding_performance", lambda: figures.encoding_grid(full_rows, order)),
             ("significant_targets", lambda: figures.significance_grid(significant, order)),
             ("lag_saturation", lambda: lag_saturation(Path(__file__).resolve().parents[3] / "results")),
@@ -375,9 +379,9 @@ def main(argv=None):
                              "needing results held on the remote host (LOSO, language decoding, "
                              "shuffled-embedding control). Combines with --all / --saturation-mode; "
                              "filenames match, so the two outputs can be merged.")
-    parser.add_argument("--example-model", default="gpt2")
-    parser.add_argument("--example-layer", type=_layer, default=0,
-                        help="Example layer, or 'none' for a layerless model (default: 0)")
+    parser.add_argument("--example-model", default="gpt-j-6b")
+    parser.add_argument("--example-layer", type=_layer, default=21,
+                        help="Example layer, or 'none' for a layerless model (default: 21)")
     parser.add_argument("--loso-example-model", help="Override the LOSO example model")
     parser.add_argument("--loso-example-layer", type=_layer, default=argparse.SUPPRESS,
                         help="Override the LOSO example layer, or 'none'")
@@ -431,3 +435,7 @@ def main(argv=None):
     paths += export_figures(data, args.output_dir, args.format, example_pair, loso_pair, "raw_fmri",
                             intervals=intervals, scope=args.scope)
     return paths
+
+
+if __name__ == "__main__":
+    main()

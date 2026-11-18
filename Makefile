@@ -20,6 +20,10 @@ FMRI_TR_PRE_FIR ?=
 SIGNIFICANCE_CHECK ?= uv run python -m scripts.utilities.check_final_significance
 LANGUAGE_DECODING_CHECK ?= uv run python -m scripts.utilities.check_language_decoding_results
 
+# Final-figure export (`make final-figures`).
+FIGURES_DIR ?= figures/final
+FIGURES_ARGS ?= --all
+
 export PYTHONPATH := $(CURDIR)
 
 # CMD=sbatch is the default. Use CMD="uv run python" for a local run.
@@ -345,5 +349,24 @@ missing-language-decoding: language-decoding-missing
 ## Jobs are linked with Slurm afterok dependencies and this command waits for all.
 regenerate-transfer-results:
 	uv run python -m scripts.utilities.run_transfer_regeneration --models $(MODELS)
+
+## Export the final figures as a batch job (instead of an interactive node).
+## FIGURES_DIR: output folder (default figures/final)
+## FIGURES_ARGS: arguments for src.utils.plotting.final_export (default --all: main figures plus the
+##   quantile and raw-fMRI appendices). Add e.g. --scope remote, --format png,
+##   --example-model gpt-j-6b --example-layer 21.
+## Use CMD="uv run python" to run it in the current shell instead of submitting.
+## Example: make final-figures FIGURES_DIR=figures/remote FIGURES_ARGS="--all --scope remote"
+final-figures:
+	@set -eu
+	mkdir -p logs "$(FIGURES_DIR)"
+	if [ "$(CMD)" = "sbatch" ]; then
+		$(SBATCH) --job-name="final-figures-$(USR)-$(DT)" submit.sh \
+			-m src.utils.plotting.final_export --output-dir "$(FIGURES_DIR)" $(FIGURES_ARGS)
+	else
+		$(CMD) -m src.utils.plotting.final_export --output-dir "$(FIGURES_DIR)" $(FIGURES_ARGS)
+	fi
+
+.PHONY: final-figures
 
 .PHONY: regenerate-transfer-results

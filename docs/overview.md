@@ -190,12 +190,14 @@ HDF5 container while keeping plots as separately browsable PNG files.
   `--scope local|remote` (default `all`) splits any of those exports by where the data lives: `local`
   writes every figure whose results are complete in the local `results/` (and never loads the shuffled
   control or validates a LOSO example); `remote` writes only the figures needing results held on the remote
-  host (LOSO aggregates and sensitivity, the LOSO subspace figures, language decoding and the shuffled
+  host (LOSO aggregates and sensitivity, the LOSO subspace figures, the word-embedding PCA figures, language decoding and the shuffled
   control; `REMOTE_ONLY` in `final_export.py`, per main/quantile/raw_fmri set). Filenames match, so the two
   output folders can be merged; `significant_targets.tex` comes with `local`, `result_gaps.txt` with both.
   `--example-model gpt2 --example-layer 6` selects the sample curves in both
-  RRR aggregates and the target-quantile figure (default: GPT-2 layer 0);
+  RRR aggregates and the target-quantile figure (default: GPT-J 6B layer 21);
   `--loso-example-model` and `--loso-example-layer` override the LOSO example.
+  `make final-figures` submits the export as a CPU-only batch job (`FIGURES_DIR`, `FIGURES_ARGS`, default
+  `--all`; e.g. `FIGURES_ARGS="--all --scope remote"`); `CMD="uv run python"` runs it in the current shell.
   Use layer `none` for layerless models. Examples must have the notebook's
   required curves for all three datasets; invalid selections report available
   pairs before writing figures. Existing export filenames are replaced.

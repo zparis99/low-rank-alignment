@@ -23,7 +23,7 @@ MEDIAN_COLOR = "#dc2626"
 CURVE_COLOR = "#4b5563"
 CHANCE = {"color": "black", "linestyle": (0, (1, 2)), "linewidth": 1.4}
 SATURATION = {"color": "#dc2626", "linestyle": "--", "linewidth": 1.6}
-TICKS, SMALL = 11, 11  # type sizes inside the dense per-layer grids
+TICKS, SMALL = 15, 13  # type sizes inside the dense per-layer grids
 
 
 def _panel_title(model, layer):
@@ -61,14 +61,14 @@ def noise_ceiling_histograms(fractions, model_layers, *, x_max=1.5):
                         weights=np.full(len(values), 1.0 / len(values)),
                         color=COLORS["rrr"], edgecolor="white", linewidth=.3)
                 ax.axvline(np.median(values), color=MEDIAN_COLOR, linewidth=1.6)
-                ax.set_title(_panel_title(model, layer), fontsize=13, fontweight="bold")
+                ax.set_title(_panel_title(model, layer), fontsize=14, fontweight="bold")
                 ax.text(.97, .95, f"Median: {np.median(values):.2f}\n$>$ 1: {np.mean(values > 1):.1%}",
                         transform=ax.transAxes, ha="right", va="top", fontsize=SMALL)
                 ax.tick_params(labelsize=TICKS, labelbottom=True)
                 finish_axis(ax)
         figure.supxlabel(r"Fraction of explainable variance captured, $r^2 / CC_{max}^2$"
-                         " (values above 1.5 in last bin)", fontsize=15)
-        figure.supylabel("Fraction of voxels", fontsize=15)
+                         " (values above 1.5 in last bin)", fontsize=16)
+        figure.supylabel("Fraction of voxels", fontsize=16)
         figure.tight_layout()
     return figure
 
@@ -101,7 +101,7 @@ def neural_pca_figure(summaries):
             for (threshold, count), color in zip(summary["needed"].items(), THRESHOLD_COLORS):
                 ax.plot([], [], color=color, linestyle="--",
                         label=f"{threshold:.0%} of variance: {count}")
-            ax.legend(frameon=False, loc="lower right", fontsize=12)
+            ax.legend(frameon=False, loc="lower right", fontsize=14)
             ax.set_xlabel("Number of principal components")
         axes[0, 0].set_ylabel("Cumulative fraction\nof variance explained")
         figure.tight_layout()
@@ -115,7 +115,7 @@ def embedding_pca_figure(result, model_layers, dataset):
         for row, (model, layers) in zip(axes, model_layers):
             for ax, layer in zip(row, layers):
                 summary = result["summaries"][(model, layer)]
-                ax.set_title(_panel_title(model, layer), fontsize=13, fontweight="bold")
+                ax.set_title(_panel_title(model, layer), fontsize=14, fontweight="bold")
                 if summary is None:
                     _missing(ax)
                     continue
@@ -123,13 +123,13 @@ def embedding_pca_figure(result, model_layers, dataset):
                 ax.text(.97, .05, "\n".join(f"{t:.0%}: {n}" for t, n in summary["needed"].items()),
                         transform=ax.transAxes, ha="right", va="bottom", fontsize=SMALL,
                         bbox={"facecolor": "white", "edgecolor": "none", "alpha": .85, "pad": 1.5})
-                ax.set_title(_panel_title(model, layer), fontsize=13, fontweight="bold")
+                ax.set_title(_panel_title(model, layer), fontsize=14, fontweight="bold")
                 ax.tick_params(labelsize=TICKS)
         thresholds = ", ".join(f"{t:.0%}" for t in PCA_THRESHOLDS)
-        figure.suptitle(f"{LABELS[dataset]} words (n = {result['n_words']:,})", fontsize=17)
+        figure.suptitle(f"{LABELS[dataset]} words (n = {result['n_words']:,})", fontsize=18)
         figure.supxlabel(f"Number of principal components (dashed lines: {thresholds} of variance)",
-                         fontsize=15)
-        figure.supylabel("Cumulative fraction of variance explained", fontsize=15)
+                         fontsize=16)
+        figure.supylabel("Cumulative fraction of variance explained", fontsize=16)
         figure.tight_layout()
     return figure
 
@@ -144,7 +144,7 @@ def _rank_axis(ax):
 
 
 def _legend_below(ax):
-    ax.legend(frameon=False, fontsize=12, loc="upper center", bbox_to_anchor=(.5, -.22))
+    ax.legend(frameon=False, fontsize=14, loc="upper center", bbox_to_anchor=(.5, -.22))
 
 
 def subspace_consistency_figure(data, sample_model, sample_layer):
@@ -221,7 +221,7 @@ def loso_principal_angle_figure(data, sample_model, sample_layer):
         for row, dataset in zip(axes, datasets):
             vectors = data["cosines"].get(dataset)
             for ax, rank in zip(row, ranks):
-                ax.set_title(f"{LABELS[dataset]}, rank {rank}", fontsize=15)
+                ax.set_title(f"{LABELS[dataset]}, rank {rank}", fontsize=16)
                 if vectors is None:
                     _missing(ax)
                     continue
@@ -242,7 +242,7 @@ def loso_principal_angle_figure(data, sample_model, sample_layer):
             ax.set_xlabel("Angle index (smallest first)")
         handles, labels = next((a.get_legend_handles_labels() for a in axes.flat
                                 if a.get_legend_handles_labels()[0]), ([], []))
-        axes[0, 0].legend(handles, labels, frameon=False, loc="lower left", fontsize=11)
+        axes[0, 0].legend(handles, labels, frameon=False, loc="lower left", fontsize=13)
         figure.suptitle(f"LOSO principal angles: {MODEL_NAMES.get(sample_model, sample_model)}, "
                         f"layer {sample_layer} (thin lines: held-out subjects)")
         figure.tight_layout(rect=(0, 0, 1, .96))
@@ -259,7 +259,7 @@ def _model_legend(ax, models, extra=(), loc="best"):
             ax.plot([], [], color=MODEL_COLORS[model], linewidth=2.2, label=MODEL_NAMES[model])
     for kwargs in extra:
         ax.plot([], [], **kwargs)
-    ax.legend(frameon=False, fontsize=12, loc=loc)
+    ax.legend(frameon=False, fontsize=14, loc=loc)
 
 
 def _mean_curve(stack):
@@ -339,14 +339,14 @@ def saturation_split_figure(table, separate_model=None):
                         marker="D", linewidth=2.8, zorder=5)
                 if len(names) < 2:
                     ax.text(.5, top, "no test (1 model)", color=color, ha="center", va="top",
-                            transform=ax.get_xaxis_transform(), fontsize=12)
+                            transform=ax.get_xaxis_transform(), fontsize=14)
                     continue
                 zeros = np.zeros(len(names))
                 for x, values, direction, sign in ((0, below, "greater", ">"),
                                                    (1, above, "less", "<")):
                     p = paired_sign_flip(values, zeros, alternative=direction)
                     ax.text(x, top, f"{sign} 0: {format_p_value(p)}", color=color,
-                            transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=12)
+                            transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=14)
             ax.set_xticks([0, 1], ["Below\nsaturation", "Above\nsaturation"])
             ax.set_xlim(-.4, 1.4)
             finish_axis(ax)
