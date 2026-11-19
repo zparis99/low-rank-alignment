@@ -330,10 +330,14 @@ def _orthonormal(a):
     return np.linalg.qr(np.asarray(a, dtype=np.float64))[0]
 
 
+def _overlap_of_orthonormal(qa, qb):
+    """`mean_squared_cosine` for bases that are already orthonormal."""
+    return float(np.sum((qa.T @ qb) ** 2) / min(qa.shape[1], qb.shape[1]))
+
+
 def mean_squared_cosine(a, b):
     """Subspace overlap in [0, 1]: mean squared cosine of the principal angles of `a`, `b`."""
-    qa, qb = _orthonormal(a), _orthonormal(b)
-    return float(np.sum((qa.T @ qb) ** 2) / min(qa.shape[1], qb.shape[1]))
+    return _overlap_of_orthonormal(_orthonormal(a), _orthonormal(b))
 
 
 def squared_cosines(a, b):
@@ -355,7 +359,8 @@ def _loso_factors(results_root, dataset, model, layer):
     Factors are returned in raw-embedding coordinates with exactly `rank` columns, or None
     if absent. iEEG artifacts store one full factor per fold (truncated to `rank` columns);
     fMRI artifacts have a single fold (`None`), one factor per rank, and one shared scaler.
-    Also returns the held-out subjects, the folds, and the largest stored rank.
+    Also returns the held-out subjects, the folds, the largest stored rank and the embedding
+    dimension `dim`.
     """
     artifact = _rrr(Path(results_root), "leave_one_subject_out", dataset, model, layer
                     ).load_artifacts(["input_factors", "input_scalers"])
@@ -375,7 +380,8 @@ def _loso_factors(results_root, dataset, model, layer):
         key = tuple(sorted({**selector, "fold": fold}.items()))
         if key not in factors:
             return None
-        return to_raw_coordinates(factors[key], scalers[key])[:, :rank]
+        # Truncate before rescaling: the stored factor is [d, d] but only `rank` columns are needed.
+        return to_raw_coordinates(factors[key][:, :rank], scalers[key])
 
     subjects = sorted({dict(k)["held_out_subject"] for k in factors}, key=str)
     if per_rank:
@@ -384,7 +390,8 @@ def _loso_factors(results_root, dataset, model, layer):
     else:
         folds = sorted({dict(k)["fold"] for k in factors})
         max_rank = next(iter(factors.values())).shape[1]
-    return raw, subjects, folds, max_rank
+    dim = next(iter(factors.values())).shape[0]
+    return raw, subjects, folds, max_rank, dim
 
 
 # Per held-out subject: RRR = held-out factor vs the factor learned on the other subjects;
@@ -392,38 +399,53 @@ def _loso_factors(results_root, dataset, model, layer):
 _LOSO_COMPARISONS = {"RRR": ("train_subjects", "rrr"), "PCA": ("baseline", "pca")}
 
 
-def loso_comparison_pairs(raw, subject, fold, rank):
+def loso_comparison_pairs(raw, subject, fold, rank, methods=tuple(_LOSO_COMPARISONS)):
     held_out = raw(subject, fold, "baseline", "rrr", rank)
-    return {name: (held_out, raw(subject, fold, *other, rank))
-            for name, other in _LOSO_COMPARISONS.items()}
+    return {name: (held_out, raw(subject, fold, *_LOSO_COMPARISONS[name], rank))
+            for name in methods}
 
 
-def loso_subspace_overlaps(results_root, dataset, model, layer):
-    """Per-subject mean squared cosine vs rank, averaged over folds: [subject, method, rank, overlap]."""
-    raw, subjects, folds, max_rank = _loso_factors(results_root, dataset, model, layer)
-    ranks = subspace_ranks(max_rank)
+def _loso_overlaps_from_factors(raw, subjects, folds, max_rank, rank_limit=None):
+    """`loso_subspace_overlaps` from loaded factors; ranks >= `rank_limit` are skipped.
+
+    The held-out factor is orthonormalized once per (subject, fold, rank) and shared by the
+    RRR and PCA comparisons.
+    """
+    ranks = [rank for rank in subspace_ranks(max_rank) if rank_limit is None or rank < rank_limit]
     rows = []
     for subject in subjects:
         overlaps = {(method, rank): [] for method in _LOSO_COMPARISONS for rank in ranks}
         for fold in folds:
             for rank in ranks:
-                for method, (a, b) in loso_comparison_pairs(raw, subject, fold, rank).items():
-                    if a is not None and b is not None:
-                        overlaps[(method, rank)].append(mean_squared_cosine(a, b))
+                held_out = raw(subject, fold, "baseline", "rrr", rank)
+                if held_out is None:
+                    continue
+                q_held_out = _orthonormal(held_out)
+                for method, other in _LOSO_COMPARISONS.items():
+                    b = raw(subject, fold, *other, rank)
+                    if b is not None:
+                        overlaps[(method, rank)].append(
+                            _overlap_of_orthonormal(q_held_out, _orthonormal(b)))
         rows.extend((str(subject), method, rank, float(np.mean(v)))
                     for (method, rank), v in overlaps.items() if v)
     return pd.DataFrame(rows, columns=["subject", "method", "rank", "overlap"])
 
 
+def loso_subspace_overlaps(results_root, dataset, model, layer):
+    """Per-subject mean squared cosine vs rank, averaged over folds: [subject, method, rank, overlap]."""
+    raw, subjects, folds, max_rank, _ = _loso_factors(results_root, dataset, model, layer)
+    return _loso_overlaps_from_factors(raw, subjects, folds, max_rank)
+
+
 def loso_squared_cosine_vectors(results_root, dataset, model, layer, ranks):
     """`{(method, rank): [n_subjects, rank]}` squared cosines of the sorted principal angles
     (smallest angle first), averaged over folds."""
-    raw, subjects, folds, _ = _loso_factors(results_root, dataset, model, layer)
+    raw, subjects, folds, *_ = _loso_factors(results_root, dataset, model, layer)
     out = {}
     for method in _LOSO_COMPARISONS:
         for rank in ranks:
             out[(method, rank)] = np.stack([
-                np.mean([squared_cosines(*loso_comparison_pairs(raw, subject, fold, rank)[method])
+                np.mean([squared_cosines(*loso_comparison_pairs(raw, subject, fold, rank, (method,))[method])
                          for fold in folds], axis=0)
                 for subject in subjects])
     return out
@@ -480,9 +502,10 @@ def loso_layer_summary(results_root, dataset, model, layer):
     over held-out subjects. Saturation rank = median over subjects of the per-subject
     saturation rank. Ranks r >= d are dropped.
     """
-    overlaps = loso_subspace_overlaps(results_root, dataset, model, layer)
-    dim = cross_dataset_basis(results_root, dataset, model, layer, "pca", 1).shape[0]
-    overlaps = overlaps[overlaps["rank"] < dim].copy()
+    # One artifact load; ranks >= dim are dropped, so never compute them (the full-rank
+    # decompositions are by far the most expensive).
+    raw, subjects, folds, max_rank, dim = _loso_factors(results_root, dataset, model, layer)
+    overlaps = _loso_overlaps_from_factors(raw, subjects, folds, max_rank, rank_limit=dim)
     chance = overlaps["rank"] / dim
     overlaps["excess"] = (overlaps["overlap"] - chance) / (1 - chance)
     by_method = overlaps.groupby(["method", "rank"])["excess"].mean().unstack(0)
@@ -534,9 +557,6 @@ def load_subspace_data(results_root, repo_root, sample_model, sample_layer,
             results_root, "loso_cosines-%s-%s-%s" % sample,
             lambda: loso_squared_cosine_vectors(
                 results_root, *sample, list(distribution_ranks))))
-        out["saturation"][dataset] = attempt(gaps, f"LOSO saturation {sample}", lambda: cached(
-            results_root, "loso_saturation-%s-%s-%s" % sample,
-            lambda: float(np.median(list(loso_saturation_ranks(results_root, *sample).values())))))
         for key in LOSO_MODEL_KEYS:
             model, layers = MODEL_LAYERS[key]
             for layer in layers:
@@ -546,6 +566,14 @@ def load_subspace_data(results_root, repo_root, sample_model, sample_layer,
                     lambda: loso_layer_summary(results_root, *label)))
                 if summary is not None:
                     out["summaries"][label] = summary
+        # The summary's saturation is this same median, so only recompute it if the sample
+        # layer is not among the summarized ones.
+        if sample in out["summaries"]:
+            out["saturation"][dataset] = out["summaries"][sample]["saturation"]
+        else:
+            out["saturation"][dataset] = attempt(gaps, f"LOSO saturation {sample}", lambda: cached(
+                results_root, "loso_saturation-%s-%s-%s" % sample,
+                lambda: float(np.median(list(loso_saturation_ranks(results_root, *sample).values())))))
     dim = cross_dataset_basis(results_root, "podcast", sample_model, sample_layer, "pca", 1).shape[0]
     out["dim"] = dim
     frames = []

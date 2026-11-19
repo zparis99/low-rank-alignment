@@ -193,6 +193,8 @@ HDF5 container while keeping plots as separately browsable PNG files.
   host (LOSO aggregates and sensitivity, the LOSO subspace figures, the word-embedding PCA figures, language decoding and the shuffled
   control; `REMOTE_ONLY` in `final_export.py`, per main/quantile/raw_fmri set). Filenames match, so the two
   output folders can be merged; `significant_targets.tex` comes with `local`, `result_gaps.txt` with both.
+  `--subspace-only` writes just the five subspace-alignment figures (`SUBSPACE_ALIGNMENT_FIGURES` in
+  `final_export.py`) without loading the final data; the other selection flags are ignored.
   `--extra-decoding-root <results_root> ...` overlays the `run_language_decoding` summaries of extra results
   roots (e.g. `results_volume/`, a volume-only decoding run made with `--results_root=results_volume`) onto
   the main ones before the decoding figures; matching rows are replaced (`overlay_decoding_summaries` in

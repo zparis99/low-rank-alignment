@@ -203,6 +203,47 @@ def _subspace_jobs(raw_fmri_only=False, intervals=None):
 
 _CACHE = {}
 
+# The subspace-alignment figures (RRR vs PCA consistency), selectable on their own with
+# `--subspace-only`. They only need `results/`, not the loaded final data.
+SUBSPACE_ALIGNMENT_FIGURES = (
+    "subspace_consistency", "loso_principal_angles", "loso_aligned_delta",
+    "loso_saturation_split", "loso_saturation_split_random_gpt2",
+)
+
+
+def _save_jobs(jobs, output_dir, formats):
+    """Build, save and close each `(name, build)` figure in turn; returns the written paths."""
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for index, (name, build) in enumerate(jobs, start=1):
+        print(f"[{index}/{len(jobs)}] Building {name}...", flush=True)
+        figure = build()
+        try:
+            for extension in dict.fromkeys(formats):
+                path = output_dir / f"{name}.{extension}"
+                print(f"Saving {path}...", flush=True)
+                figure.savefig(path, dpi=300, bbox_inches="tight")
+                paths.append(path)
+                print(f"Saved {path}", flush=True)
+        finally:
+            plt.close(figure)
+    return paths
+
+
+def export_subspace_figures(output_dir, formats):
+    """Write only the `SUBSPACE_ALIGNMENT_FIGURES` to `output_dir` (no final data is loaded)."""
+    from src.utils.plotting.final_axes import set_model_point_colors
+
+    set_model_point_colors(True)
+    jobs = [job for job in _subspace_jobs() if job[0] in SUBSPACE_ALIGNMENT_FIGURES]
+    print(f"Subspace only: {len(jobs)} figures.", flush=True)
+    paths = _save_jobs(jobs, output_dir, formats)
+    print(f"Export complete: {len(paths)} files in {output_dir}", flush=True)
+    return paths
+
 
 def export_figures(data, output_dir, formats, example_pair, loso_pair,
                    saturation_mode="explained_variance", shuffled=None, intervals=None,
@@ -223,7 +264,6 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
     `REMOTE_ONLY`); the significance table belongs to the local scope, the gap report is written
     with every scope.
     """
-    import matplotlib.pyplot as plt
     from src.utils.plotting import final_figures as figures
     from src.utils.plotting.final_axes import set_model_point_colors
 
@@ -335,20 +375,7 @@ def export_figures(data, output_dir, formats, example_pair, loso_pair,
         jobs.extend(_subspace_jobs(intervals=intervals))
     jobs = select_jobs(jobs, saturation_mode, scope)
     print(f"Scope {scope}: {len(jobs)} figures for {saturation_mode}.", flush=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    for index, (name, build) in enumerate(jobs, start=1):
-        print(f"[{index}/{len(jobs)}] Building {name}...", flush=True)
-        figure = build()
-        try:
-            for extension in dict.fromkeys(formats):
-                path = output_dir / f"{name}.{extension}"
-                print(f"Saving {path}...", flush=True)
-                figure.savefig(path, dpi=300, bbox_inches="tight")
-                paths.append(path)
-                print(f"Saved {path}", flush=True)
-        finally:
-            plt.close(figure)
+    paths = _save_jobs(jobs, output_dir, formats)
     if saturation_mode == "explained_variance":
         if scope != "remote":
             table_path = output_dir / "significant_targets.tex"
@@ -384,6 +411,11 @@ def main(argv=None):
                              "needing results held on the remote host (LOSO, language decoding, "
                              "shuffled-embedding control). Combines with --all / --saturation-mode; "
                              "filenames match, so the two outputs can be merged.")
+    parser.add_argument("--subspace-only", action="store_true",
+                        help="Export only the subspace-alignment figures (subspace_consistency, "
+                             "loso_principal_angles, loso_aligned_delta, loso_saturation_split*) "
+                             "to <output-dir> without loading the final data. --all, "
+                             "--saturation-mode, --scope and the example options are ignored.")
     parser.add_argument("--example-model", default="gpt-j-6b")
     parser.add_argument("--example-layer", type=_layer, default=21,
                         help="Example layer, or 'none' for a layerless model (default: 21)")
@@ -399,6 +431,8 @@ def main(argv=None):
     import matplotlib
 
     matplotlib.use("Agg")
+    if args.subspace_only:
+        return export_subspace_figures(args.output_dir, args.format)
     from src.utils.plotting.final_data import load_final_data, load_shuffled_internal_data
 
     results_root = Path(__file__).resolve().parents[3] / "results"

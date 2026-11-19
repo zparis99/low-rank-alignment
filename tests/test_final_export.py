@@ -149,3 +149,18 @@ def test_scope_forwarded_to_every_appendix(monkeypatch, tmp_path):
                         lambda *args, **kwargs: calls.append(kwargs) or [])
     final_export.main(["--output-dir", str(tmp_path), "--all", "--scope", "remote"])
     assert [call["scope"] for call in calls] == ["remote"] * 3
+
+
+def test_subspace_only_skips_data_loading_and_writes_only_subspace_figures(monkeypatch, tmp_path):
+    def fail(*args, **kwargs):
+        raise AssertionError("final data must not be loaded")
+
+    monkeypatch.setattr(final_data, "load_final_data", fail)
+    monkeypatch.setattr(final_export, "export_figures", fail)
+    names = []
+    monkeypatch.setattr(final_export, "_subspace_jobs", lambda **kwargs: [
+        (name, None) for name in (*final_export.SUBSPACE_ALIGNMENT_FIGURES, "roi_normalized_curves")])
+    monkeypatch.setattr(final_export, "_save_jobs",
+                        lambda jobs, output_dir, formats: names.extend(job[0] for job in jobs) or [])
+    final_export.main(["--output-dir", str(tmp_path), "--subspace-only"])
+    assert tuple(names) == final_export.SUBSPACE_ALIGNMENT_FIGURES
