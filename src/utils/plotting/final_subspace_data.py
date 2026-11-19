@@ -452,7 +452,7 @@ def cross_dataset_basis(results_root, dataset, model, layer, method, rank):
                     ).load_artifacts(["input_factors", "input_scalers"])
     key = (("method", method),)
     return to_raw_coordinates(index_by_selector(artifact.input_factors)[key],
-                              index_by_selector(artifact.input_scalers)[key])[:, :rank]
+                              index_by_selector(artifact.input_scalers)[()])[:, :rank]
 
 
 def cross_subspace_overlaps(results_root, pair, model, layer, ranks):
