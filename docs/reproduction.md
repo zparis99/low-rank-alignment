@@ -24,7 +24,9 @@ export PAPER_DATASETS="podcast cars-2 fmri"
 
 Keep these variables in the shell used for subsequent commands. The lockfile
 selects CUDA 13.0 PyTorch packages; the embedding configs select CUDA. Use a
-compatible GPU environment. Dataset downloads additionally require Git,
+compatible GPU environment. The lockfile also includes `librosa` (audio
+features) and `pycortex` (fMRI voxel atlas labels, read from the
+`pycortex-db` directory under `data/ds003020/derivatives/`). Dataset downloads additionally require Git,
 curl, unzip, jq, DataLad, and git-annex. Install these system tools separately.
 
 ## 2. Supply the datasets and GloVe vectors
@@ -288,24 +290,68 @@ offsets `[-1, 0, 1]`. Directed decoding reads source fits directly and does not
 need the cross-dataset RRR metric artifacts from step 10. fMRI decodes words by
 default; `FMRI_TR_PRE_FIR=true` requests a separate optional TR-decoding analysis.
 
-## 12. Check the complete matrix and export figures
+## 12. Run the figure-only controls and checks
+
+The final figures also use two results that no earlier stage produces.
+
+Compute the fMRI noise ceilings from the test-story repeats (writes
+`results/fmri_noise_ceiling/<subject>.npz`):
+
+```bash
+uv run python -m scripts.fmri.compute_noise_ceiling
+```
+
+Run the shuffled-embedding null control for internal RRR. It permutes which
+word embedding is paired with which neural response and writes to a separate
+`results/run_rrr_shuffled/` tree, so it does not overwrite step 8:
+
+```bash
+for dataset in $PAPER_DATASETS; do
+  make rrr DATASET="$dataset" RRR_MODE=cross_model_layer \
+    MODELS="$PAPER_MODELS" OVERRIDES="--shuffle_embeddings=true" CMD="uv run python"
+done
+```
+
+`shuffle_seed` defaults to 0. Shuffling is supported only for internal mode.
+The control reuses the step 7 significance selection.
+
+Then check the complete matrix:
 
 ```bash
 uv run python -m scripts.utilities.check_rrr_results --results-root results
 uv run python -m scripts.utilities.check_language_decoding_results --results-root results
-uv run python notebooks/final_plots.py --output-dir figures
 ```
 
 Resolve missing/incomplete results reported by the checks before treating the
-figure export as complete. The export writes PDF, PNG, SVG, a significance
-LaTeX table, and a result-gap report; existing export filenames are replaced.
+figure export as complete.
+
+## 13. Export figures
+
+```bash
+make final-figures CMD="uv run python" FIGURES_DIR=figures/final
+```
+
+This runs `python -m src.utils.plotting.final_export --output-dir figures/final --all`.
+`--all` writes the main explained-variance figures to the output directory, the
+target-quantile appendix to `quantile/`, and the raw-fMRI r² appendix to
+`raw_fmri/`. Each figure is written as PDF, PNG, and SVG, alongside a
+significance LaTeX table and `result_gaps.txt`, which lists figure inputs that
+were missing; existing filenames are replaced. Pass other exporter options with
+`FIGURES_ARGS` (for example `FIGURES_ARGS="--all --format png"`,
+`--example-model gpt-j-6b --example-layer 21`, or `--subspace-only` for just the
+subspace-alignment figures). `--scope local` exports only figures whose results are
+complete in the local `results/`; `--scope remote` exports the rest (LOSO, language
+decoding, and the shuffled control), and the two outputs can be merged.
+`notebooks/final_plots.py` is an interactive marimo notebook of the same figures
+and does not take command-line options.
+
 Analysis artifacts live under `results/` and language labels under
 `processed_data/`. Analysis configs normally use `refresh: false` to resume
 existing artifacts; many preprocessing configs use `refresh: true`.
 
 ## Slurm execution
 
-For steps 7–11, omitting `CMD="uv run python"` submits Slurm jobs. Submission
+For steps 7–11, the shuffled control in step 12, and step 13, omitting `CMD="uv run python"` submits Slurm jobs. Submission
 does not imply completion: wait for each prerequisite stage before submitting
 consumers. `submit.sh` currently activates a site-specific `align_env`, calls
 `module purge`, and requests a GPU and 64 GB RAM. Adapt its environment and
@@ -316,5 +362,7 @@ create that named environment.
 source fits, step 10, and step 11: it submits sources and all directed
 RRR/decoding consumers with `afterok` dependencies, includes internal decoding,
 and waits for the pipeline. It forces refresh and does not replace significance,
-internal iEEG RRR evaluation, or LOSO. `make final-results` covers only a subset
-of the result matrix and is not a complete reproduction command.
+internal iEEG RRR evaluation, LOSO, the noise ceilings, or the shuffled control.
+`make final-results` covers only a subset of the result matrix and is not a
+complete reproduction command. `make final-figures` submits the step 13 export as a
+batch job when `CMD` is left at its default.
